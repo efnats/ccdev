@@ -1,0 +1,402 @@
+#!/usr/bin/env bash
+# ccdev – mosh/ssh into a host, attach/create a byobu session, and run claude --resume
+
+set -euo pipefail
+
+BYOBU_SESSION="claude"
+USER_OVERRIDE=""
+REMOTE_DIR=""
+NO_SCREENSHOTS=0
+NEW_SESSION=0
+SYNC_AUTH=0
+LOCAL_SCREENSHOT_DIR="$HOME/Pictures/Screenshots"
+
+usage() {
+  cat <<EOF
+Usage: ccdev [OPTIONS] [user@]host [dir]
+
+Options:
+  -u, --user USER       SSH username (overrides user in user@host)
+  -d, --dir  DIR        Directory to cd into on the remote before starting claude
+      --no-screenshots  Disable automatic screenshot sync
+      --new             Start a new Claude session (skip --resume)
+      --sync-auth       Sync local Claude auth to remote host
+  -h, --help            Show this help
+
+Examples:
+  ccdev root@192.168.1.10
+  ccdev -u root 192.168.1.10
+  ccdev root@192.168.1.10 /opt/myproject
+  ccdev -u root 192.168.1.10 -d /opt/myproject
+EOF
+  exit 0
+}
+
+# --- Parse arguments ---
+POSITIONAL=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -u|--user)
+      USER_OVERRIDE="$2"
+      shift 2
+      ;;
+    -d|--dir)
+      REMOTE_DIR="$2"
+      shift 2
+      ;;
+    --no-screenshots)
+      NO_SCREENSHOTS=1
+      shift
+      ;;
+    --sync-auth)
+      SYNC_AUTH=1
+      shift
+      ;;
+    --new)
+      NEW_SESSION=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      ;;
+    -*)
+      echo "Unknown option: $1" >&2
+      usage
+      ;;
+    *)
+      POSITIONAL+=("$1")
+      shift
+      ;;
+  esac
+done
+
+if [[ ${#POSITIONAL[@]} -eq 0 ]]; then
+  echo "Error: no host specified." >&2
+  usage
+fi
+
+TARGET="${POSITIONAL[0]}"
+
+if [[ ${#POSITIONAL[@]} -ge 2 && -z "$REMOTE_DIR" ]]; then
+  REMOTE_DIR="${POSITIONAL[1]}"
+fi
+
+if [[ "$TARGET" == *@* ]]; then
+  PARSED_USER="${TARGET%%@*}"
+  HOST="${TARGET##*@}"
+else
+  PARSED_USER=""
+  HOST="$TARGET"
+fi
+
+if [[ -n "$USER_OVERRIDE" ]]; then
+  SSH_USER="$USER_OVERRIDE"
+elif [[ -n "$PARSED_USER" ]]; then
+  SSH_USER="$PARSED_USER"
+else
+  SSH_USER="$USER"
+fi
+
+SSH_TARGET="${SSH_USER}@${HOST}"
+
+if [[ -n "$REMOTE_DIR" ]]; then
+  CD_CMD="cd $(printf '%q' "$REMOTE_DIR") && "
+else
+  CD_CMD=""
+fi
+
+# This script runs on the remote host
+REMOTE_CMD=$(cat <<REMOTE
+#!/usr/bin/env bash
+set -euo pipefail
+
+BYOBU_SESSION="${BYOBU_SESSION}"
+CD_CMD="${CD_CMD}"
+NEW_SESSION="${NEW_SESSION}"
+
+new_session() {
+  echo "→ Starte neue byobu-Session '\${BYOBU_SESSION}' …"
+  byobu new-session -s "\${BYOBU_SESSION}" -d
+  if [[ "${NEW_SESSION}" -eq 1 ]]; then
+    byobu send-keys -t "${BYOBU_SESSION}" "${CD_CMD}claude" Enter
+  else
+    byobu send-keys -t "${BYOBU_SESSION}" "${CD_CMD}claude --resume" Enter
+  fi
+  byobu attach-session -t "\${BYOBU_SESSION}"
+}
+
+SESSIONS=\$(byobu list-sessions 2>/dev/null || true)
+
+if [[ -z "\$SESSIONS" ]]; then
+  echo "Keine byobu-Sessions gefunden."
+  new_session
+  exit 0
+fi
+
+echo ""
+echo "Aktive byobu-Sessions:"
+echo "──────────────────────────────────────"
+mapfile -t SESSION_NAMES < <(echo "\$SESSIONS" | awk -F: '{print \$1}')
+i=1
+while IFS= read -r line; do
+  echo "  [\$i] \$line"
+  (( i++ ))
+done <<< "\$SESSIONS"
+echo "──────────────────────────────────────"
+echo "  [n] Neue Session erstellen"
+echo "  [q] Abbrechen"
+echo ""
+
+while true; do
+  read -rp "Wahl: " CHOICE
+
+  if [[ "\$CHOICE" == "q" ]]; then
+    echo "Abgebrochen."
+    exit 0
+  fi
+
+  if [[ "\$CHOICE" == "n" ]]; then
+    new_session
+    exit 0
+  fi
+
+  if [[ "\$CHOICE" =~ ^[0-9]+$ ]] && (( CHOICE >= 1 && CHOICE <= \${#SESSION_NAMES[@]} )); then
+    SELECTED="\${SESSION_NAMES[\$(( CHOICE - 1 ))]}"
+    echo ""
+    echo "  [a] Attachen"
+    echo "  [k] Killen"
+    echo "  [b] Zurück"
+    read -rp "Aktion für '\$SELECTED': " ACTION
+
+    case "\$ACTION" in
+      a)
+        byobu attach-session -t "\$SELECTED"
+        exit 0
+        ;;
+      k)
+        byobu kill-session -t "\$SELECTED"
+        echo "Session '\$SELECTED' beendet."
+        # Refresh list
+        SESSIONS=\$(byobu list-sessions 2>/dev/null || true)
+        if [[ -z "\$SESSIONS" ]]; then
+          echo "Keine Sessions mehr vorhanden."
+          read -rp "Neue Session erstellen? [j/n]: " YN
+          [[ "\$YN" == "j" ]] && new_session
+          exit 0
+        fi
+        mapfile -t SESSION_NAMES < <(echo "\$SESSIONS" | awk -F: '{print \$1}')
+        echo ""
+        echo "Verbleibende Sessions:"
+        echo "──────────────────────────────────────"
+        i=1
+        while IFS= read -r line; do
+          echo "  [\$i] \$line"
+          (( i++ ))
+        done <<< "\$SESSIONS"
+        echo "──────────────────────────────────────"
+        echo "  [n] Neue Session erstellen"
+        echo "  [q] Abbrechen"
+        echo ""
+        ;;
+      b)
+        # loop back
+        ;;
+      *)
+        echo "Ungültige Aktion."
+        ;;
+    esac
+  else
+    echo "Ungültige Eingabe."
+  fi
+done
+REMOTE
+)
+
+QUOTED_CMD="$(printf '%q' "$REMOTE_CMD")"
+
+# --- Preflight: Lokale Dependencies ---
+LOCAL_FAIL=0
+for tool in mosh ssh scp; do
+  if ! command -v "$tool" &>/dev/null; then
+    echo "✗ Lokal fehlt: $tool" >&2
+    LOCAL_FAIL=1
+  fi
+done
+[[ "$LOCAL_FAIL" -eq 1 ]] && exit 1
+
+# --- Preflight: Remote Dependencies ---
+echo "🔍 Prüfe Remote-Dependencies auf ${SSH_TARGET}…"
+REMOTE_CHECK=$(ssh -o ConnectTimeout=5 "${SSH_TARGET}" \
+  'export PATH="$HOME/.npm-global/bin:$PATH"; MISSING=(); for t in byobu mosh-server claude; do command -v "$t" &>/dev/null || MISSING+=("$t"); done; echo "${MISSING[*]}"' 2>&1)
+SSH_RC=$?
+
+if [[ "$SSH_RC" -ne 0 ]]; then
+  echo "✗ SSH-Verbindung zu ${SSH_TARGET} fehlgeschlagen:" >&2
+  echo "  $REMOTE_CHECK" >&2
+  exit 1
+fi
+
+if [[ -n "$REMOTE_CHECK" ]]; then
+  echo "✗ Remote fehlen folgende Tools: $REMOTE_CHECK"
+  echo ""
+
+  APT_MISSING=""
+  CLAUDE_MISSING=0
+  for t in $REMOTE_CHECK; do
+    case "$t" in
+      claude) CLAUDE_MISSING=1 ;;
+      *)      APT_MISSING="$APT_MISSING $t" ;;
+    esac
+  done
+
+  read -rp "  Jetzt auf ${SSH_TARGET} installieren? [j/N] " REPLY
+  if [[ ! "$REPLY" =~ ^[jJ]$ ]]; then
+    echo "Abgebrochen." >&2
+    exit 1
+  fi
+
+  if [[ -n "$APT_MISSING" ]]; then
+    echo "  ⬇ Installiere via apt:${APT_MISSING}…"
+    ssh -t "${SSH_TARGET}" "sudo apt-get update -qq && sudo apt-get install -y${APT_MISSING}"
+  fi
+
+  if [[ "$CLAUDE_MISSING" -eq 1 ]]; then
+    echo "  ⬇ Prüfe Node.js…"
+    ssh -t "${SSH_TARGET}" 'bash -lc "
+      NODE_OK=0
+      if command -v node &>/dev/null; then
+        NODE_VER=\$(node -e \"process.stdout.write(process.version.slice(1).split(\\\".\\\")[0])\")
+        [ \"\$NODE_VER\" -ge 18 ] && NODE_OK=1
+      fi
+      if [ \"\$NODE_OK\" -eq 0 ]; then
+        echo \"  ⬇ Installiere Node.js 20...\"
+        curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+        sudo apt-get install -y nodejs
+      else
+        echo \"  ✓ Node.js \$(node --version)\"
+      fi
+      # npm sicherstellen (Ubuntu apt nodejs enthält es nicht immer)
+      if ! command -v npm &>/dev/null; then
+        echo \"  ⬇ Installiere npm...\"
+        sudo apt-get install -y npm
+      fi
+      echo \"  ⬇ Setze npm prefix...\"
+      mkdir -p ~/.npm-global
+      npm config set prefix ~/.npm-global
+      echo \"  ⬇ Installiere claude...\"
+      PATH=\"\$HOME/.npm-global/bin:\$PATH\" npm install -g @anthropic-ai/claude-code
+      grep -qxF \"export PATH=\\\"\\\$HOME/.npm-global/bin:\\\$PATH\\\"\" ~/.bashrc \
+        || echo \"export PATH=\\\"\\\$HOME/.npm-global/bin:\\\$PATH\\\"\" >> ~/.bashrc
+      echo \"  ✓ claude installiert\"
+    "'
+  fi
+
+  # Nochmal prüfen ob Installation erfolgreich war
+  echo ""
+  echo "🔍 Prüfe erneut…"
+  REMOTE_CHECK=$(ssh -o ConnectTimeout=5 "${SSH_TARGET}" \
+    'export PATH="$HOME/.npm-global/bin:$PATH"; MISSING=(); for t in byobu mosh-server claude; do command -v "$t" &>/dev/null || MISSING+=("$t"); done; echo "${MISSING[*]}"' 2>&1)
+  if [[ -n "$REMOTE_CHECK" ]]; then
+    echo "✗ Installation fehlgeschlagen, fehlen noch: $REMOTE_CHECK" >&2
+    exit 1
+  fi
+fi
+echo "  ✓ Remote-Dependencies OK"
+echo ""
+
+
+# --- Claude Auth prüfen und ggf. von lokal übertragen ---
+if [[ "$SYNC_AUTH" -eq 1 ]]; then
+echo "🔑 Prüfe Claude-Auth auf ${SSH_TARGET}…"
+REMOTE_AUTH=$(ssh -o ConnectTimeout=5 "${SSH_TARGET}"   'test -f ~/.claude/.credentials.json && echo "ok" || (grep -q "oauthAccount\|apiKey" ~/.claude/settings.json 2>/dev/null && echo "ok" || echo "missing")' 2>/dev/null || echo "missing")
+
+if [[ "$REMOTE_AUTH" != "ok" ]]; then
+  echo "  ⚠ Keine Claude-Auth auf Remote gefunden"
+
+  # Lokale Auth prüfen
+  LOCAL_AUTH_OK=0
+  if [[ -f "$HOME/.claude/.credentials.json" ]] || \
+     grep -q "oauthAccount\|apiKey" "$HOME/.claude/settings.json" 2>/dev/null; then
+    LOCAL_AUTH_OK=1
+  fi
+
+  if [[ "$LOCAL_AUTH_OK" -eq 0 ]]; then
+    echo "  ✗ Auch lokal keine Claude-Auth gefunden." >&2
+    echo "    Bitte zuerst lokal \'claude\' starten und einloggen, dann erneut verbinden." >&2
+    exit 1
+  fi
+
+  read -rp "  Lokale Auth (~/.claude/) auf ${SSH_TARGET} übertragen? [j/N] " REPLY
+  if [[ "$REPLY" =~ ^[jJ]$ ]]; then
+    echo "  ⬆ Übertrage ~/.claude/…"
+    ssh "${SSH_TARGET}" "mkdir -p ~/.claude"
+    # Nur Auth-relevante Dateien — keine projektspezifischen Settings
+    for f in .credentials.json settings.json; do
+      [[ -f "$HOME/.claude/$f" ]] && scp -q "$HOME/.claude/$f" "${SSH_TARGET}:~/.claude/$f"
+    done
+    echo "  ✓ Auth übertragen"
+  else
+    echo "  ⚠ Auth nicht übertragen — claude wird nach Login fragen"
+  fi
+else
+  echo "  ✓ Claude-Auth OK"
+fi
+fi
+echo ""
+
+# --- Screenshot-Watcher ---
+WATCHER_PID=""
+if [[ "$NO_SCREENSHOTS" -eq 0 ]]; then
+  if ! command -v inotifywait &>/dev/null; then
+    echo "⚠ inotifywait nicht gefunden — Screenshot-Sync deaktiviert (inotify-tools installieren oder --no-screenshots nutzen)"
+  elif [[ ! -d "$LOCAL_SCREENSHOT_DIR" ]]; then
+    echo "⚠ Screenshot-Verzeichnis nicht gefunden: $LOCAL_SCREENSHOT_DIR — Screenshot-Sync deaktiviert"
+  else
+    # Remote-Ziel: Geschwisterverzeichnis neben REMOTE_DIR, oder ~/screenshots als Fallback
+    if [[ -n "$REMOTE_DIR" ]]; then
+      REMOTE_SCREENSHOT_DIR="$(dirname "$REMOTE_DIR")/screenshots"
+    else
+      REMOTE_SCREENSHOT_DIR="~/screenshots"
+    fi
+
+    ssh "${SSH_TARGET}" "mkdir -p ${REMOTE_SCREENSHOT_DIR}" 2>/dev/null
+
+    # --- /ss Slash-Command auf Remote anlegen falls nicht vorhanden ---
+    SS_EXISTS=$(ssh "${SSH_TARGET}" "test -f ~/.claude/commands/ss.md && echo yes || echo no" 2>/dev/null)
+    if [[ "$SS_EXISTS" != "yes" ]]; then
+      TMPSS=$(mktemp)
+      cat > "$TMPSS" <<SSEOF
+Finde den neuesten Screenshot im Verzeichnis ${REMOTE_SCREENSHOT_DIR}/ und lies ihn mit dem Read-Tool.
+
+Der neueste Screenshot ist:
+!\`ls -t ${REMOTE_SCREENSHOT_DIR}/ 2>/dev/null | head -1 | sed "s|^|${REMOTE_SCREENSHOT_DIR}/|"\`
+
+Falls \$ARGUMENTS angegeben, beantworte die Frage zum Screenshot. Ansonsten beschreibe was du siehst.
+SSEOF
+      ssh "${SSH_TARGET}" "mkdir -p ~/.claude/commands" 2>/dev/null
+      scp -q "$TMPSS" "${SSH_TARGET}:~/.claude/commands/ss.md"
+      rm -f "$TMPSS"
+      echo "  ✓ /ss Slash-Command auf Remote erstellt"
+    fi
+
+    echo "📸 Screenshot-Watcher aktiv → ${SSH_TARGET}:${REMOTE_SCREENSHOT_DIR}"
+    inotifywait -m -e close_write "$LOCAL_SCREENSHOT_DIR" --format '%f' 2>/dev/null \
+      | while IFS= read -r FILE; do
+          DATETIME=$(date '+%Y%m%d-%H%M%S')
+          DEST="${REMOTE_SCREENSHOT_DIR}/cp-${DATETIME}.png"
+          scp -q "$LOCAL_SCREENSHOT_DIR/$FILE" "${SSH_TARGET}:${DEST}" 2>/dev/null \
+            && echo "  📤 $FILE → ${DEST}"
+        done &
+    WATCHER_PID=$!
+  fi
+fi
+
+trap '[[ -n "$WATCHER_PID" ]] && kill "$WATCHER_PID" 2>/dev/null && echo "🛑 Screenshot-Watcher gestoppt"' EXIT
+
+if command -v mosh &>/dev/null; then
+  echo "→ Connecting to ${SSH_TARGET} via mosh …"
+  exec mosh "$SSH_TARGET" -- bash -lc "$REMOTE_CMD"
+else
+  echo "→ mosh not found, falling back to ssh …"
+  exec ssh -t "$SSH_TARGET" "bash -lc ${QUOTED_CMD}"
+fi
