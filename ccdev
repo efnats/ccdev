@@ -380,23 +380,30 @@ SSEOF
     fi
 
     echo "📸 Screenshot-Watcher aktiv → ${SSH_TARGET}:${REMOTE_SCREENSHOT_DIR}"
-    inotifywait -m -e close_write "$LOCAL_SCREENSHOT_DIR" --format '%f' 2>/dev/null \
-      | while IFS= read -r FILE; do
-          DATETIME=$(date '+%Y%m%d-%H%M%S')
-          DEST="${REMOTE_SCREENSHOT_DIR}/cp-${DATETIME}.png"
-          scp -q "$LOCAL_SCREENSHOT_DIR/$FILE" "${SSH_TARGET}:${DEST}" 2>/dev/null \
-            && echo "  📤 $FILE → ${DEST}"
-        done &
+
+    (inotifywait -m -e close_write "$LOCAL_SCREENSHOT_DIR" --format '%f' 2>/dev/null | while read FILE; do
+      DATETIME=$(date '+%Y%m%d-%H%M%S')
+      DEST="${REMOTE_SCREENSHOT_DIR}/cp-${DATETIME}.png"
+      scp "$LOCAL_SCREENSHOT_DIR/$FILE" "${SSH_TARGET}:${DEST}" 2>/dev/null \
+        && ssh "${SSH_TARGET}" "echo \"\$(date +%H:%M:%S) ✓ $FILE → ${DEST}\" >> ${REMOTE_SCREENSHOT_DIR}/../cc-watcher.log"
+    done) &
     WATCHER_PID=$!
   fi
 fi
 
-trap '[[ -n "$WATCHER_PID" ]] && kill "$WATCHER_PID" 2>/dev/null && echo "🛑 Screenshot-Watcher gestoppt"' EXIT
+cleanup() {
+  if [[ -n "$WATCHER_PID" ]]; then
+    kill -- -"$WATCHER_PID" 2>/dev/null || kill "$WATCHER_PID" 2>/dev/null
+    wait "$WATCHER_PID" 2>/dev/null
+    echo "🛑 Screenshot-Watcher gestoppt"
+  fi
+}
+trap cleanup EXIT
 
 if command -v mosh &>/dev/null; then
   echo "→ Connecting to ${SSH_TARGET} via mosh …"
-  exec mosh "$SSH_TARGET" -- bash -lc "$REMOTE_CMD"
+  mosh "$SSH_TARGET" -- bash -lc "$REMOTE_CMD"
 else
   echo "→ mosh not found, falling back to ssh …"
-  exec ssh -t "$SSH_TARGET" "bash -lc ${QUOTED_CMD}"
+  ssh -t "$SSH_TARGET" "bash -lc ${QUOTED_CMD}"
 fi
