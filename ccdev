@@ -244,8 +244,9 @@ if [[ -n "$REMOTE_CHECK" ]]; then
   CLAUDE_MISSING=0
   for t in $REMOTE_CHECK; do
     case "$t" in
-      claude) CLAUDE_MISSING=1 ;;
-      *)      APT_MISSING="$APT_MISSING $t" ;;
+      claude)      CLAUDE_MISSING=1 ;;
+      mosh-server) APT_MISSING="$APT_MISSING mosh" ;;
+      *)           APT_MISSING="$APT_MISSING $t" ;;
     esac
   done
 
