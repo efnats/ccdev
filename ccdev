@@ -114,7 +114,7 @@ fi
 # --- Read .ccdev config from remote project dir ---
 if [[ -z "$SERVER_CMD" && -n "$REMOTE_DIR" ]]; then
   REMOTE_SERVER_CMD=$(ssh -o ConnectTimeout=5 "${SSH_TARGET}" \
-    "test -f ${REMOTE_DIR}/.ccdev && . ${REMOTE_DIR}/.ccdev && echo \"\$SERVER_CMD\"" 2>/dev/null || true)
+    'test -f '"${REMOTE_DIR}"'/.ccdev && . '"${REMOTE_DIR}"'/.ccdev && echo "$SERVER_CMD"' 2>/dev/null || true)
   if [[ -n "$REMOTE_SERVER_CMD" ]]; then
     SERVER_CMD="$REMOTE_SERVER_CMD"
     echo "  ✓ .ccdev config gefunden: SERVER_CMD gesetzt"
