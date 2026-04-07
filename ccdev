@@ -121,6 +121,19 @@ if [[ -z "$SERVER_CMD" && -n "$REMOTE_DIR" ]]; then
   fi
 fi
 
+# --- Prüfe entr auf Remote wenn SERVER_CMD gesetzt ---
+if [[ -n "$SERVER_CMD" ]]; then
+  ENTR_OK=$(ssh -o ConnectTimeout=5 "${SSH_TARGET}" 'command -v entr &>/dev/null && echo yes || echo no' 2>/dev/null || echo "no")
+  if [[ "$ENTR_OK" != "yes" ]]; then
+    echo "  ⚠ entr nicht auf Remote gefunden (nützlich für auto-restart des Dev-Servers)"
+    read -rp "  entr auf ${SSH_TARGET} installieren? [j/N] " REPLY
+    if [[ "$REPLY" =~ ^[jJ]$ ]]; then
+      ssh -t "${SSH_TARGET}" "sudo apt-get update -qq && sudo apt-get install -y entr"
+      echo "  ✓ entr installiert"
+    fi
+  fi
+fi
+
 # This script runs on the remote host
 REMOTE_CMD=$(cat <<REMOTE
 #!/usr/bin/env bash
