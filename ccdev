@@ -9,6 +9,7 @@ REMOTE_DIR=""
 NO_SCREENSHOTS=0
 NEW_SESSION=0
 SYNC_AUTH=0
+SERVER_CMD=""
 LOCAL_SCREENSHOT_DIR="$HOME/Pictures/Screenshots"
 
 usage() {
@@ -18,6 +19,7 @@ Usage: ccdev [OPTIONS] [user@]host [dir]
 Options:
   -u, --user USER       SSH username (overrides user in user@host)
   -d, --dir  DIR        Directory to cd into on the remote before starting claude
+  -s, --server CMD      Dev server command (overrides .ccdev on remote)
       --no-screenshots  Disable automatic screenshot sync
       --new             Start a new Claude session (skip --resume)
       --sync-auth       Sync local Claude auth to remote host
@@ -42,6 +44,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     -d|--dir)
       REMOTE_DIR="$2"
+      shift 2
+      ;;
+    -s|--server)
+      SERVER_CMD="$2"
       shift 2
       ;;
     --no-screenshots)
@@ -105,6 +111,16 @@ else
   CD_CMD=""
 fi
 
+# --- Read .ccdev config from remote project dir ---
+if [[ -z "$SERVER_CMD" && -n "$REMOTE_DIR" ]]; then
+  REMOTE_SERVER_CMD=$(ssh -o ConnectTimeout=5 "${SSH_TARGET}" \
+    "test -f ${REMOTE_DIR}/.ccdev && . ${REMOTE_DIR}/.ccdev && echo \"\$SERVER_CMD\"" 2>/dev/null || true)
+  if [[ -n "$REMOTE_SERVER_CMD" ]]; then
+    SERVER_CMD="$REMOTE_SERVER_CMD"
+    echo "  ✓ .ccdev config gefunden: SERVER_CMD gesetzt"
+  fi
+fi
+
 # This script runs on the remote host
 REMOTE_CMD=$(cat <<REMOTE
 #!/usr/bin/env bash
@@ -113,15 +129,34 @@ set -euo pipefail
 BYOBU_SESSION="${BYOBU_SESSION}"
 CD_CMD="${CD_CMD}"
 NEW_SESSION="${NEW_SESSION}"
+SERVER_CMD="${SERVER_CMD}"
 
 new_session() {
   echo "→ Starte neue byobu-Session '\${BYOBU_SESSION}' …"
   byobu new-session -s "\${BYOBU_SESSION}" -d
-  if [[ "${NEW_SESSION}" -eq 1 ]]; then
-    byobu send-keys -t "${BYOBU_SESSION}" "${CD_CMD}claude" Enter
+
+  if [[ -n "${SERVER_CMD}" ]]; then
+    # Split-Pane Layout: Claude links, Server rechts
+    byobu split-window -h -t "\${BYOBU_SESSION}:0"
+
+    # Rechtes Pane (0.1): Server starten
+    byobu send-keys -t "\${BYOBU_SESSION}:0.1" "${CD_CMD}${SERVER_CMD}" Enter
+
+    # Linkes Pane (0.0): Claude Code starten
+    if [[ "${NEW_SESSION}" -eq 1 ]]; then
+      byobu send-keys -t "\${BYOBU_SESSION}:0.0" "${CD_CMD}claude" Enter
+    else
+      byobu send-keys -t "\${BYOBU_SESSION}:0.0" "${CD_CMD}claude --resume" Enter
+    fi
   else
-    byobu send-keys -t "${BYOBU_SESSION}" "${CD_CMD}claude --resume" Enter
+    # Single-Pane: nur Claude
+    if [[ "${NEW_SESSION}" -eq 1 ]]; then
+      byobu send-keys -t "${BYOBU_SESSION}" "${CD_CMD}claude" Enter
+    else
+      byobu send-keys -t "${BYOBU_SESSION}" "${CD_CMD}claude --resume" Enter
+    fi
   fi
+
   byobu attach-session -t "\${BYOBU_SESSION}"
 }
 
@@ -362,23 +397,27 @@ if [[ "$NO_SCREENSHOTS" -eq 0 ]]; then
 
     ssh "${SSH_TARGET}" "mkdir -p ${REMOTE_SCREENSHOT_DIR}" 2>/dev/null
 
-    # --- /ss Slash-Command auf Remote anlegen falls nicht vorhanden ---
-    SS_EXISTS=$(ssh "${SSH_TARGET}" "test -f ~/.claude/commands/ss.md && echo yes || echo no" 2>/dev/null)
-    if [[ "$SS_EXISTS" != "yes" ]]; then
-      TMPSS=$(mktemp)
-      cat > "$TMPSS" <<SSEOF
-Finde den neuesten Screenshot im Verzeichnis ${REMOTE_SCREENSHOT_DIR}/ und lies ihn mit dem Read-Tool.
-
-Der neueste Screenshot ist:
-!\`ls -t ${REMOTE_SCREENSHOT_DIR}/ 2>/dev/null | head -1 | sed "s|^|${REMOTE_SCREENSHOT_DIR}/|"\`
-
-Falls \$ARGUMENTS angegeben, beantworte die Frage zum Screenshot. Ansonsten beschreibe was du siehst.
-SSEOF
-      ssh "${SSH_TARGET}" "mkdir -p ~/.claude/commands" 2>/dev/null
-      scp -q "$TMPSS" "${SSH_TARGET}:~/.claude/commands/ss.md"
-      rm -f "$TMPSS"
-      echo "  ✓ /ss Slash-Command auf Remote erstellt"
+    # --- /ss Slash-Command auf Remote anlegen ---
+    # Projektspezifisch wenn REMOTE_DIR gesetzt, sonst global
+    if [[ -n "$REMOTE_DIR" ]]; then
+      SS_CMD_DIR="${REMOTE_DIR}/.claude/commands"
+    else
+      SS_CMD_DIR="~/.claude/commands"
     fi
+
+    TMPSS=$(mktemp)
+    cat > "$TMPSS" <<SSEOF
+Schau dir die neuesten Screenshots im Verzeichnis ${REMOTE_SCREENSHOT_DIR}/ an.
+Sortiere nach Dateiname absteigend (neueste zuerst).
+
+Falls \$ARGUMENTS eine Zahl ist, lies die entsprechende Anzahl der neuesten Screenshots.
+Falls \$ARGUMENTS Text ist, lies den neuesten Screenshot und beantworte die Frage dazu.
+Falls \$ARGUMENTS leer ist, lies den neuesten Screenshot und beschreibe was du siehst.
+SSEOF
+    ssh "${SSH_TARGET}" "mkdir -p ${SS_CMD_DIR}" 2>/dev/null
+    scp -q "$TMPSS" "${SSH_TARGET}:${SS_CMD_DIR}/ss.md"
+    rm -f "$TMPSS"
+    echo "  ✓ /ss Slash-Command auf Remote erstellt (${SS_CMD_DIR})"
 
     echo "📸 Screenshot-Watcher aktiv → ${SSH_TARGET}:${REMOTE_SCREENSHOT_DIR}"
 

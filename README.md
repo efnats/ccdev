@@ -11,6 +11,7 @@ Connect to a remote Claude Code dev session via mosh/ssh with automatic byobu se
 - **Screenshot sync** - watches a local screenshot directory and copies new files to the remote host via scp
 - **`/ss` slash command** - automatically creates a Claude custom command on the remote to read the latest screenshot
 - **Auth sync** - optionally transfer local Claude credentials to the remote host
+- **Dev server split-pane** - automatically splits the terminal when a `.ccdev` config is found in the project directory
 
 ## Install
 
@@ -30,6 +31,7 @@ ccdev [OPTIONS] [user@]host [dir]
 |---|---|
 | `-u, --user USER` | SSH username (overrides user in user@host) |
 | `-d, --dir DIR` | Directory to cd into on the remote before starting Claude |
+| `-s, --server CMD` | Dev server command (overrides `.ccdev` config on remote) |
 | `--no-screenshots` | Disable automatic screenshot sync |
 | `--new` | Start a new Claude session (skip --resume) |
 | `--sync-auth` | Sync local Claude auth (~/.claude/) to remote host |
@@ -52,6 +54,9 @@ ccdev --new root@192.168.1.10
 
 # Sync auth credentials to the remote
 ccdev --sync-auth root@192.168.1.10
+
+# Override dev server command from CLI
+ccdev root@192.168.1.10 /opt/myproject --server "npm run dev"
 ```
 
 ## How it works
@@ -68,6 +73,22 @@ ccdev --sync-auth root@192.168.1.10
 The screenshot watcher monitors `~/Pictures/Screenshots` on your local machine. When a new screenshot appears, it is copied to the remote host into a `screenshots/` directory next to your project (or `~/screenshots/` if no project dir is set).
 
 Inside Claude, use `/ss` to read and analyze the latest screenshot.
+
+## Dev server split-pane
+
+If your project has a dev server, create a `.ccdev` file in the project root on the remote:
+
+```bash
+# /opt/myproject/.ccdev
+SERVER_CMD="npm run dev"
+```
+
+When ccdev connects and creates a new session, it will automatically:
+1. Split the byobu window horizontally (left/right)
+2. Start Claude Code in the left pane
+3. Run the server command in the right pane
+
+You can also override this from the CLI with `--server CMD`.
 
 ## Requirements
 
