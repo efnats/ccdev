@@ -401,9 +401,9 @@ if [[ "$NO_SCREENSHOTS" -eq 0 ]]; then
   elif [[ ! -d "$LOCAL_SCREENSHOT_DIR" ]]; then
     echo "⚠ Screenshot-Verzeichnis nicht gefunden: $LOCAL_SCREENSHOT_DIR — Screenshot-Sync deaktiviert"
   else
-    # Remote-Ziel: Geschwisterverzeichnis neben REMOTE_DIR, oder ~/screenshots als Fallback
+    # Remote-Ziel: screenshots/ im Projektverzeichnis, oder ~/screenshots als Fallback
     if [[ -n "$REMOTE_DIR" ]]; then
-      REMOTE_SCREENSHOT_DIR="$(dirname "$REMOTE_DIR")/screenshots"
+      REMOTE_SCREENSHOT_DIR="${REMOTE_DIR}/screenshots"
     else
       REMOTE_SCREENSHOT_DIR="~/screenshots"
     fi
