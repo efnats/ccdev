@@ -72,7 +72,15 @@ ccdev root@192.168.1.10 /opt/myproject --server "npm run dev"
 
 The screenshot watcher monitors `~/Pictures/Screenshots` on your local machine. When a new screenshot appears, it is copied to the remote host into a `screenshots/` directory next to your project (or `~/screenshots/` if no project dir is set).
 
-Inside Claude, use `/ss` to read and analyze the latest screenshot.
+ccdev automatically creates a `/ss` slash command on the remote. When a project directory is set, the command is placed in `<project>/.claude/commands/ss.md` (project-specific); otherwise in `~/.claude/commands/ss.md` (global). It is updated on every connect.
+
+### Usage inside Claude
+
+```
+/ss              → read and describe the latest screenshot
+/ss 3            → read the 3 most recent screenshots
+/ss what error?  → read the latest screenshot and answer the question
+```
 
 ## Dev server split-pane
 
