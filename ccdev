@@ -157,16 +157,16 @@ new_session() {
 
     # Linkes Pane (0.0): Claude Code starten
     if [[ "${NEW_SESSION}" -eq 1 ]]; then
-      byobu send-keys -t "\${BYOBU_SESSION}:0.0" "${CD_CMD}claude" Enter
+      byobu send-keys -t "\${BYOBU_SESSION}:0.0" "${CD_CMD}claude --enable-auto-mode" Enter
     else
-      byobu send-keys -t "\${BYOBU_SESSION}:0.0" "${CD_CMD}claude --resume" Enter
+      byobu send-keys -t "\${BYOBU_SESSION}:0.0" "${CD_CMD}claude --resume --enable-auto-mode" Enter
     fi
   else
     # Single-Pane: nur Claude
     if [[ "${NEW_SESSION}" -eq 1 ]]; then
-      byobu send-keys -t "${BYOBU_SESSION}" "${CD_CMD}claude" Enter
+      byobu send-keys -t "${BYOBU_SESSION}" "${CD_CMD}claude --enable-auto-mode" Enter
     else
-      byobu send-keys -t "${BYOBU_SESSION}" "${CD_CMD}claude --resume" Enter
+      byobu send-keys -t "${BYOBU_SESSION}" "${CD_CMD}claude --resume --enable-auto-mode" Enter
     fi
   fi
 
