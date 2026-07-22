@@ -10,7 +10,15 @@ NO_SCREENSHOTS=0
 NEW_SESSION=0
 SYNC_AUTH=0
 SERVER_CMD=""
-LOCAL_SCREENSHOT_DIR="$HOME/Pictures/Screenshots"
+# Screenshot-Verzeichnis: per --screenshot-dir / CCDEV_SCREENSHOT_DIR überschreibbar.
+# Fallback: $HOME/Pictures/Screenshots, bei root ggf. das des aufrufenden Users (SUDO_USER).
+if [[ -n "${CCDEV_SCREENSHOT_DIR:-}" ]]; then
+  LOCAL_SCREENSHOT_DIR="$CCDEV_SCREENSHOT_DIR"
+elif [[ $EUID -eq 0 && -n "${SUDO_USER:-}" && -d "/home/${SUDO_USER}/Pictures/Screenshots" ]]; then
+  LOCAL_SCREENSHOT_DIR="/home/${SUDO_USER}/Pictures/Screenshots"
+else
+  LOCAL_SCREENSHOT_DIR="$HOME/Pictures/Screenshots"
+fi
 
 usage() {
   cat <<EOF
@@ -20,6 +28,8 @@ Options:
   -u, --user USER       SSH username (overrides user in user@host)
   -d, --dir  DIR        Directory to cd into on the remote before starting claude
   -s, --server CMD      Dev server command (overrides .ccdev on remote)
+  -S, --screenshot-dir DIR  Local screenshot dir to watch
+                            (default: \$HOME/Pictures/Screenshots, or CCDEV_SCREENSHOT_DIR)
       --no-screenshots  Disable automatic screenshot sync
       --new             Start a new Claude session (skip --resume)
       --sync-auth       Sync local Claude auth to remote host
@@ -48,6 +58,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     -s|--server)
       SERVER_CMD="$2"
+      shift 2
+      ;;
+    -S|--screenshot-dir)
+      LOCAL_SCREENSHOT_DIR="$2"
       shift 2
       ;;
     --no-screenshots)
@@ -157,16 +171,16 @@ new_session() {
 
     # Linkes Pane (0.0): Claude Code starten
     if [[ "${NEW_SESSION}" -eq 1 ]]; then
-      byobu send-keys -t "\${BYOBU_SESSION}:0.0" "${CD_CMD}claude --enable-auto-mode" Enter
+      byobu send-keys -t "\${BYOBU_SESSION}:0.0" "${CD_CMD}claude" Enter
     else
-      byobu send-keys -t "\${BYOBU_SESSION}:0.0" "${CD_CMD}claude --resume --enable-auto-mode" Enter
+      byobu send-keys -t "\${BYOBU_SESSION}:0.0" "${CD_CMD}claude --resume" Enter
     fi
   else
     # Single-Pane: nur Claude
     if [[ "${NEW_SESSION}" -eq 1 ]]; then
-      byobu send-keys -t "${BYOBU_SESSION}" "${CD_CMD}claude --enable-auto-mode" Enter
+      byobu send-keys -t "${BYOBU_SESSION}" "${CD_CMD}claude" Enter
     else
-      byobu send-keys -t "${BYOBU_SESSION}" "${CD_CMD}claude --resume --enable-auto-mode" Enter
+      byobu send-keys -t "${BYOBU_SESSION}" "${CD_CMD}claude --resume" Enter
     fi
   fi
 
@@ -394,7 +408,9 @@ fi
 echo ""
 
 # --- Screenshot-Watcher ---
-WATCHER_PID=""
+INOTIFY_PID=""
+LOOP_PID=""
+WATCH_FIFO=""
 if [[ "$NO_SCREENSHOTS" -eq 0 ]]; then
   if ! command -v inotifywait &>/dev/null; then
     echo "⚠ inotifywait nicht gefunden — Screenshot-Sync deaktiviert (inotify-tools installieren oder --no-screenshots nutzen)"
@@ -434,22 +450,37 @@ SSEOF
 
     echo "📸 Screenshot-Watcher aktiv → ${SSH_TARGET}:${REMOTE_SCREENSHOT_DIR}"
 
-    (inotifywait -m -e close_write "$LOCAL_SCREENSHOT_DIR" --format '%f' 2>/dev/null | while read FILE; do
-      DATETIME=$(date '+%Y%m%d-%H%M%S')
-      DEST="${REMOTE_SCREENSHOT_DIR}/cp-${DATETIME}.png"
-      scp "$LOCAL_SCREENSHOT_DIR/$FILE" "${SSH_TARGET}:${DEST}" 2>/dev/null \
-        && ssh "${SSH_TARGET}" "echo \"\$(date +%H:%M:%S) ✓ $FILE → ${DEST}\" >> ${REMOTE_SCREENSHOT_DIR}/../cc-watcher.log"
-    done) &
-    WATCHER_PID=$!
+    # close_write deckt Tools ab, die direkt schreiben (GNOME);
+    # moved_to deckt Tools ab, die in eine Temp-Datei schreiben und atomar
+    # umbenennen (Flameshot, Spectacle, KDE …).
+    # inotifywait und die Sync-Schleife laufen als getrennte Prozesse über
+    # einen FIFO, damit beim Cleanup BEIDE PIDs eindeutig bekannt sind und
+    # inotifywait nicht verwaist zurückbleibt.
+    WATCH_FIFO=$(mktemp -u)
+    mkfifo "$WATCH_FIFO"
+
+    inotifywait -m -e close_write -e moved_to "$LOCAL_SCREENSHOT_DIR" \
+      --format '%f' 2>/dev/null > "$WATCH_FIFO" &
+    INOTIFY_PID=$!
+
+    (
+      while read -r FILE; do
+        DATETIME=$(date '+%Y%m%d-%H%M%S')
+        DEST="${REMOTE_SCREENSHOT_DIR}/cp-${DATETIME}.png"
+        scp "$LOCAL_SCREENSHOT_DIR/$FILE" "${SSH_TARGET}:${DEST}" 2>/dev/null \
+          && ssh "${SSH_TARGET}" "echo \"\$(date +%H:%M:%S) ✓ $FILE → ${DEST}\" >> ${REMOTE_SCREENSHOT_DIR}/../cc-watcher.log"
+      done < "$WATCH_FIFO"
+    ) &
+    LOOP_PID=$!
   fi
 fi
 
 cleanup() {
-  if [[ -n "$WATCHER_PID" ]]; then
-    kill -- -"$WATCHER_PID" 2>/dev/null || kill "$WATCHER_PID" 2>/dev/null
-    wait "$WATCHER_PID" 2>/dev/null
-    echo "🛑 Screenshot-Watcher gestoppt"
-  fi
+  [[ -n "$INOTIFY_PID" ]] && kill "$INOTIFY_PID" 2>/dev/null
+  [[ -n "$LOOP_PID" ]]    && kill "$LOOP_PID" 2>/dev/null
+  wait "$INOTIFY_PID" "$LOOP_PID" 2>/dev/null
+  [[ -n "$WATCH_FIFO" ]] && rm -f "$WATCH_FIFO"
+  [[ -n "$INOTIFY_PID$LOOP_PID" ]] && echo "🛑 Screenshot-Watcher gestoppt"
 }
 trap cleanup EXIT
 
