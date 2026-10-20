@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ccdev – mosh/ssh into a host, attach/create a byobu session, and run claude --resume
+# ccdev – mosh/ssh into a host, attach/create byobu sessions (one per project dir), and run claude
 
 set -euo pipefail
 
@@ -10,6 +10,8 @@ NO_SCREENSHOTS=0
 NEW_SESSION=0
 SYNC_AUTH=0
 SERVER_CMD=""
+BASE_DIR=""      # Projekt-Basisverzeichnis auf dem Remote (leer = dessen $HOME)
+RESTORE=0
 # Screenshot-Verzeichnis: per --screenshot-dir / CCDEV_SCREENSHOT_DIR überschreibbar.
 # Fallback: $HOME/Pictures/Screenshots, bei root ggf. das des aufrufenden Users (SUDO_USER).
 if [[ -n "${CCDEV_SCREENSHOT_DIR:-}" ]]; then
@@ -33,6 +35,10 @@ Options:
                             (default: \$HOME/Pictures/Screenshots, or CCDEV_SCREENSHOT_DIR)
       --no-screenshots  Disable automatic screenshot sync
       --new             Start a new Claude session (skip --resume)
+      --base DIR        Remote base dir for projects (subdirs with CLAUDE.md or .ccdev;
+                        default: remote \$HOME)
+      --restore         Start byobu sessions for all projects not running yet
+                        (claude --continue), then show the session menu
       --sync-auth       Sync local Claude auth to remote host
   -h, --help            Show this help
 
@@ -42,6 +48,7 @@ Examples:
   ccdev root@192.168.1.10 /opt/myproject          # byobu session "myproject"
   ccdev -n homelab root@192.168.1.10
   ccdev -u root 192.168.1.10 -d /opt/myproject
+  ccdev --restore root@192.168.1.10                 # after a reboot: restart all projects
 EOF
   exit 0
 }
@@ -80,6 +87,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --new)
       NEW_SESSION=1
+      shift
+      ;;
+    --base)
+      BASE_DIR="$2"
+      shift 2
+      ;;
+    --restore)
+      RESTORE=1
       shift
       ;;
     -h|--help)
@@ -135,12 +150,6 @@ fi
 
 SSH_TARGET="${SSH_USER}@${HOST}"
 
-if [[ -n "$REMOTE_DIR" ]]; then
-  CD_CMD="cd $(printf '%q' "$REMOTE_DIR") && "
-else
-  CD_CMD=""
-fi
-
 # --- Read .ccdev config from remote project dir ---
 if [[ -z "$SERVER_CMD" && -n "$REMOTE_DIR" ]]; then
   REMOTE_SERVER_CMD=$(ssh -o ConnectTimeout=5 "${SSH_TARGET}" \
@@ -164,128 +173,190 @@ if [[ -n "$SERVER_CMD" ]]; then
   fi
 fi
 
-# This script runs on the remote host
-REMOTE_CMD=$(cat <<REMOTE
-#!/usr/bin/env bash
+# This script runs on the remote host.
+# Kopf: Einstellungen sauber quotiert; Rumpf: Programm unverändert (quoted heredoc, keine \$-Maskierung nötig).
+REMOTE_HEAD=$(printf 'BYOBU_SESSION=%q\nREMOTE_DIR=%q\nNEW_SESSION=%q\nSERVER_CMD=%q\nBASE_DIR=%q\nRESTORE=%q\n' \
+  "$BYOBU_SESSION" "$REMOTE_DIR" "$NEW_SESSION" "$SERVER_CMD" "$BASE_DIR" "$RESTORE")
+REMOTE_BODY=$(cat <<'REMOTE'
 set -euo pipefail
 
-BYOBU_SESSION="${BYOBU_SESSION}"
-CD_CMD="${CD_CMD}"
-NEW_SESSION="${NEW_SESSION}"
-SERVER_CMD="${SERVER_CMD}"
+# Wird von ccdev auf dem Zielrechner ausgeführt. Davor setzt ccdev:
+# BYOBU_SESSION REMOTE_DIR NEW_SESSION SERVER_CMD BASE_DIR RESTORE
+BASE_DIR="${BASE_DIR:-$HOME}"
+CD_CMD=""
+[[ -n "$REMOTE_DIR" ]] && CD_CMD="cd $(printf '%q' "$REMOTE_DIR") && "
 
-new_session() {
-  if byobu has-session -t "=\${BYOBU_SESSION}" 2>/dev/null; then
-    echo "→ byobu-Session '\${BYOBU_SESSION}' existiert bereits, verbinde …"
-    byobu attach-session -t "=\${BYOBU_SESSION}"
-    return
-  fi
-  echo "→ Starte neue byobu-Session '\${BYOBU_SESSION}' …"
-  byobu new-session -s "\${BYOBU_SESSION}" -d
+# --- Projekte: Unterordner von BASE_DIR mit CLAUDE.md oder .ccdev ---
+proj_key()     { printf '%s' "$1" | sed 's/[^A-Za-z0-9]/-/g'; }        # Claude-Projektordner-Name
+proj_hist()    { echo "$HOME/.claude/projects/$(proj_key "$1")"; }
+has_history()  { ls "$(proj_hist "$1")"/*.jsonl >/dev/null 2>&1; }
+last_activity() {
+  local f; f=$(ls -t "$(proj_hist "$1")"/*.jsonl 2>/dev/null | head -1 || true)
+  if [[ -n "$f" ]]; then date -r "$f" +%d.%m.%Y; else echo "neu"; fi
+}
+sname() { local n; n=$(basename "$1"); echo "${n//[.:]/_}"; }
 
-  if [[ -n "${SERVER_CMD}" ]]; then
-    # Split-Pane Layout: Claude links, Server rechts
-    byobu split-window -h -t "\${BYOBU_SESSION}:0"
-
-    # Rechtes Pane (0.1): Server starten
-    byobu send-keys -t "\${BYOBU_SESSION}:0.1" "${CD_CMD}${SERVER_CMD}" Enter
-
-    # Linkes Pane (0.0): Claude Code starten
-    if [[ "${NEW_SESSION}" -eq 1 ]]; then
-      byobu send-keys -t "\${BYOBU_SESSION}:0.0" "${CD_CMD}claude" Enter
-    else
-      byobu send-keys -t "\${BYOBU_SESSION}:0.0" "${CD_CMD}claude --resume" Enter
-    fi
-  else
-    # Single-Pane: nur Claude
-    if [[ "${NEW_SESSION}" -eq 1 ]]; then
-      byobu send-keys -t "\${BYOBU_SESSION}" "${CD_CMD}claude" Enter
-    else
-      byobu send-keys -t "\${BYOBU_SESSION}" "${CD_CMD}claude --resume" Enter
-    fi
-  fi
-
-  byobu attach-session -t "\${BYOBU_SESSION}"
+list_projects() {   # nur Projekte ohne laufende byobu-Session
+  local d
+  for d in "$BASE_DIR"/*/; do
+    d="${d%/}"
+    [[ -f "$d/CLAUDE.md" || -f "$d/.ccdev" ]] || continue
+    byobu has-session -t "=$(sname "$d")" 2>/dev/null && continue
+    echo "$d"
+  done
 }
 
-SESSIONS=\$(byobu list-sessions 2>/dev/null || true)
+start_project() {   # $1 = Projektordner; startet die byobu-Session im Hintergrund
+  local d="$1" n srv cl qd
+  n=$(sname "$d"); qd=$(printf '%q' "$d")
+  byobu has-session -t "=$n" 2>/dev/null && return 0
+  byobu new-session -d -s "$n" -c "$d"
+  srv=""
+  [[ -f "$d/.ccdev" ]] && srv=$(bash -c '. "$1/.ccdev" >/dev/null 2>&1; echo "${SERVER_CMD:-}"' _ "$d")
+  cl="claude"; has_history "$d" && cl="claude --continue"
+  if [[ -n "$srv" ]]; then
+    byobu split-window -h -t "$n:0"
+    byobu send-keys -t "$n:0.1" "cd $qd && $srv" Enter
+    byobu send-keys -t "$n:0.0" "cd $qd && $cl" Enter
+  else
+    byobu send-keys -t "$n:0" "cd $qd && $cl" Enter
+  fi
+  echo "  ✓ gestartet: $n  ($d, $([[ $cl == *continue ]] && echo "letzte Sitzung fortgesetzt" || echo "neue Sitzung"))"
+}
 
-if [[ -z "\$SESSIONS" ]]; then
+restore_all() {
+  local d any=0
+  while IFS= read -r d; do [[ -n "$d" ]] && { start_project "$d"; any=1; }; done < <(list_projects)
+  [[ $any -eq 1 ]] || echo "  (keine gespeicherten Projekte ohne laufende Session)"
+}
+
+new_session() {
+  if byobu has-session -t "=${BYOBU_SESSION}" 2>/dev/null; then
+    echo "→ byobu-Session '${BYOBU_SESSION}' existiert bereits, verbinde …"
+    byobu attach-session -t "=${BYOBU_SESSION}"
+    return
+  fi
+  echo "→ Starte neue byobu-Session '${BYOBU_SESSION}' …"
+  byobu new-session -s "${BYOBU_SESSION}" -d
+  local cl="claude --resume"
+  [[ "${NEW_SESSION}" -eq 1 ]] && cl="claude"
+  if [[ -n "${SERVER_CMD}" ]]; then
+    # Split-Pane Layout: Claude links, Server rechts
+    byobu split-window -h -t "${BYOBU_SESSION}:0"
+    byobu send-keys -t "${BYOBU_SESSION}:0.1" "${CD_CMD}${SERVER_CMD}" Enter
+    byobu send-keys -t "${BYOBU_SESSION}:0.0" "${CD_CMD}${cl}" Enter
+  else
+    byobu send-keys -t "${BYOBU_SESSION}:0" "${CD_CMD}${cl}" Enter
+  fi
+  byobu attach-session -t "=${BYOBU_SESSION}"
+}
+
+# --- Menü ---
+SESSION_NAMES=(); PROJECTS=()
+load_lists() {
+  SESSION_NAMES=(); PROJECTS=()
+  local s
+  while IFS= read -r s; do [[ -n "$s" ]] && SESSION_NAMES+=("$s"); done < <(byobu list-sessions -F '#{session_name}' 2>/dev/null || true)
+  while IFS= read -r s; do [[ -n "$s" ]] && PROJECTS+=("$s"); done < <(list_projects)
+}
+show_menu() {
+  local i=1 s line info
+  echo ""
+  if [[ ${#SESSION_NAMES[@]} -gt 0 ]]; then
+    echo "Aktive byobu-Sessions:"
+    echo "──────────────────────────────────────"
+    while IFS= read -r line; do
+      [[ -n "$line" ]] && echo "  [$i] $line" && i=$((i + 1))
+    done < <(byobu list-sessions 2>/dev/null || true)
+  fi
+  if [[ ${#PROJECTS[@]} -gt 0 ]]; then
+    echo "Gespeicherte Projekte (nicht gestartet) in $BASE_DIR:"
+    echo "──────────────────────────────────────"
+    for s in "${PROJECTS[@]}"; do
+      if has_history "$s"; then info="zuletzt $(last_activity "$s")"; else info="noch kein Verlauf"; fi
+      printf "  [%d] %-14s %s, %s\n" "$i" "$(sname "$s")" "$s" "$info"
+      i=$((i + 1))
+    done
+  fi
+  echo "──────────────────────────────────────"
+  [[ ${#PROJECTS[@]} -gt 0 ]] && echo "  [r] Alle gespeicherten Projekte starten"
+  echo "  [n] Neue Session erstellen"
+  echo "  [q] Abbrechen"
+  echo ""
+}
+
+if [[ "${RESTORE}" -eq 1 ]]; then
+  echo "→ Starte alle gespeicherten Projekte in $BASE_DIR …"
+  restore_all
+fi
+
+load_lists
+if [[ ${#SESSION_NAMES[@]} -eq 0 && ${#PROJECTS[@]} -eq 0 ]]; then
   echo "Keine byobu-Sessions gefunden."
   new_session
   exit 0
 fi
+if [[ ${#SESSION_NAMES[@]} -eq 0 && -n "$REMOTE_DIR" ]]; then
+  new_session          # wie bisher: mit Verzeichnis und ohne laufende Sessions direkt starten
+  exit 0
+fi
 
-echo ""
-echo "Aktive byobu-Sessions:"
-echo "──────────────────────────────────────"
-mapfile -t SESSION_NAMES < <(echo "\$SESSIONS" | awk -F: '{print \$1}')
-i=1
-while IFS= read -r line; do
-  echo "  [\$i] \$line"
-  (( i++ ))
-done <<< "\$SESSIONS"
-echo "──────────────────────────────────────"
-echo "  [n] Neue Session erstellen"
-echo "  [q] Abbrechen"
-echo ""
-
+show_menu
 while true; do
   read -rp "Wahl: " CHOICE
+  NS=${#SESSION_NAMES[@]}; NP=${#PROJECTS[@]}
 
-  if [[ "\$CHOICE" == "q" ]]; then
+  if [[ "$CHOICE" == "q" ]]; then
     echo "Abgebrochen."
     exit 0
   fi
 
-  if [[ "\$CHOICE" == "n" ]]; then
-    read -rp "Name der neuen Session [\${BYOBU_SESSION}]: " NAME
-    NAME="\${NAME:-\$BYOBU_SESSION}"
-    BYOBU_SESSION="\${NAME//[.:]/_}"
+  if [[ "$CHOICE" == "r" && $NP -gt 0 ]]; then
+    restore_all
+    load_lists; show_menu
+    continue
+  fi
+
+  if [[ "$CHOICE" == "n" ]]; then
+    read -rp "Name der neuen Session [${BYOBU_SESSION}]: " NAME
+    NAME="${NAME:-$BYOBU_SESSION}"
+    BYOBU_SESSION="${NAME//[.:]/_}"
     new_session
     exit 0
   fi
 
-  if [[ "\$CHOICE" =~ ^[0-9]+$ ]] && (( CHOICE >= 1 && CHOICE <= \${#SESSION_NAMES[@]} )); then
-    SELECTED="\${SESSION_NAMES[\$(( CHOICE - 1 ))]}"
+  if [[ "$CHOICE" =~ ^[0-9]+$ ]] && (( CHOICE >= 1 && CHOICE <= NS + NP )); then
+    if (( CHOICE > NS )); then
+      P="${PROJECTS[$(( CHOICE - NS - 1 ))]}"
+      start_project "$P"
+      byobu attach-session -t "=$(sname "$P")"
+      exit 0
+    fi
+    SELECTED="${SESSION_NAMES[$(( CHOICE - 1 ))]}"
     echo ""
     echo "  [a] Attachen"
     echo "  [k] Killen"
     echo "  [b] Zurück"
-    read -rp "Aktion für '\$SELECTED': " ACTION
-
-    case "\$ACTION" in
+    read -rp "Aktion für '$SELECTED': " ACTION
+    case "$ACTION" in
       a)
-        byobu attach-session -t "\$SELECTED"
+        byobu attach-session -t "=$SELECTED"
         exit 0
         ;;
       k)
-        byobu kill-session -t "\$SELECTED"
-        echo "Session '\$SELECTED' beendet."
-        # Refresh list
-        SESSIONS=\$(byobu list-sessions 2>/dev/null || true)
-        if [[ -z "\$SESSIONS" ]]; then
+        byobu kill-session -t "=$SELECTED"
+        echo "Session '$SELECTED' beendet."
+        load_lists
+        if [[ ${#SESSION_NAMES[@]} -eq 0 && ${#PROJECTS[@]} -eq 0 ]]; then
           echo "Keine Sessions mehr vorhanden."
           read -rp "Neue Session erstellen? [j/n]: " YN
-          [[ "\$YN" == "j" ]] && new_session
+          [[ "$YN" == "j" ]] && new_session
           exit 0
         fi
-        mapfile -t SESSION_NAMES < <(echo "\$SESSIONS" | awk -F: '{print \$1}')
-        echo ""
-        echo "Verbleibende Sessions:"
-        echo "──────────────────────────────────────"
-        i=1
-        while IFS= read -r line; do
-          echo "  [\$i] \$line"
-          (( i++ ))
-        done <<< "\$SESSIONS"
-        echo "──────────────────────────────────────"
-        echo "  [n] Neue Session erstellen"
-        echo "  [q] Abbrechen"
-        echo ""
+        show_menu
         ;;
       b)
-        # loop back
+        show_menu
         ;;
       *)
         echo "Ungültige Aktion."
@@ -297,6 +368,9 @@ while true; do
 done
 REMOTE
 )
+REMOTE_CMD="#!/usr/bin/env bash
+${REMOTE_HEAD}
+${REMOTE_BODY}"
 
 QUOTED_CMD="$(printf '%q' "$REMOTE_CMD")"
 
