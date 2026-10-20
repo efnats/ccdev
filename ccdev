@@ -3,7 +3,7 @@
 
 set -euo pipefail
 
-BYOBU_SESSION="claude"
+BYOBU_SESSION=""
 USER_OVERRIDE=""
 REMOTE_DIR=""
 NO_SCREENSHOTS=0
@@ -27,6 +27,7 @@ Usage: ccdev [OPTIONS] [user@]host [dir]
 Options:
   -u, --user USER       SSH username (overrides user in user@host)
   -d, --dir  DIR        Directory to cd into on the remote before starting claude
+  -n, --name NAME       byobu session name (default: basename of dir, else "claude")
   -s, --server CMD      Dev server command (overrides .ccdev on remote)
   -S, --screenshot-dir DIR  Local screenshot dir to watch
                             (default: \$HOME/Pictures/Screenshots, or CCDEV_SCREENSHOT_DIR)
@@ -38,7 +39,8 @@ Options:
 Examples:
   ccdev root@192.168.1.10
   ccdev -u root 192.168.1.10
-  ccdev root@192.168.1.10 /opt/myproject
+  ccdev root@192.168.1.10 /opt/myproject          # byobu session "myproject"
+  ccdev -n homelab root@192.168.1.10
   ccdev -u root 192.168.1.10 -d /opt/myproject
 EOF
   exit 0
@@ -54,6 +56,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     -d|--dir)
       REMOTE_DIR="$2"
+      shift 2
+      ;;
+    -n|--name)
+      BYOBU_SESSION="$2"
       shift 2
       ;;
     -s|--server)
@@ -100,6 +106,16 @@ TARGET="${POSITIONAL[0]}"
 if [[ ${#POSITIONAL[@]} -ge 2 && -z "$REMOTE_DIR" ]]; then
   REMOTE_DIR="${POSITIONAL[1]}"
 fi
+
+# byobu session name: explicit -n, else basename of dir, else "claude"
+if [[ -z "$BYOBU_SESSION" ]]; then
+  if [[ -n "$REMOTE_DIR" ]]; then
+    BYOBU_SESSION="$(basename "$REMOTE_DIR")"
+  else
+    BYOBU_SESSION="claude"
+  fi
+fi
+BYOBU_SESSION="${BYOBU_SESSION//[.:]/_}"   # tmux forbids . and : in session names
 
 if [[ "$TARGET" == *@* ]]; then
   PARSED_USER="${TARGET%%@*}"
@@ -159,6 +175,11 @@ NEW_SESSION="${NEW_SESSION}"
 SERVER_CMD="${SERVER_CMD}"
 
 new_session() {
+  if byobu has-session -t "=\${BYOBU_SESSION}" 2>/dev/null; then
+    echo "→ byobu-Session '\${BYOBU_SESSION}' existiert bereits, verbinde …"
+    byobu attach-session -t "=\${BYOBU_SESSION}"
+    return
+  fi
   echo "→ Starte neue byobu-Session '\${BYOBU_SESSION}' …"
   byobu new-session -s "\${BYOBU_SESSION}" -d
 
@@ -178,9 +199,9 @@ new_session() {
   else
     # Single-Pane: nur Claude
     if [[ "${NEW_SESSION}" -eq 1 ]]; then
-      byobu send-keys -t "${BYOBU_SESSION}" "${CD_CMD}claude" Enter
+      byobu send-keys -t "\${BYOBU_SESSION}" "${CD_CMD}claude" Enter
     else
-      byobu send-keys -t "${BYOBU_SESSION}" "${CD_CMD}claude --resume" Enter
+      byobu send-keys -t "\${BYOBU_SESSION}" "${CD_CMD}claude --resume" Enter
     fi
   fi
 
@@ -218,6 +239,9 @@ while true; do
   fi
 
   if [[ "\$CHOICE" == "n" ]]; then
+    read -rp "Name der neuen Session [\${BYOBU_SESSION}]: " NAME
+    NAME="\${NAME:-\$BYOBU_SESSION}"
+    BYOBU_SESSION="\${NAME//[.:]/_}"
     new_session
     exit 0
   fi
