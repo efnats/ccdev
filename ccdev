@@ -3,7 +3,7 @@
 
 set -euo pipefail
 
-VERSION="1.0.0"
+VERSION="1.0.1"
 BYOBU_SESSION=""
 USER_OVERRIDE=""
 REMOTE_DIR=""

@@ -2,6 +2,11 @@
 
 All notable changes to ccdev. Versions follow [Semantic Versioning](https://semver.org/); each release is a git tag (`vX.Y.Z`).
 
+## [1.0.1] - 2026-10-21
+
+### Changed
+- README and docs/inventory.md use neutral example names instead of the author's own hosts and projects.
+
 ## [1.0.0] - 2026-10-21
 
 First tagged release. Earlier development is in the git history.

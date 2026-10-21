@@ -44,7 +44,7 @@ Saved projects (not started) in /root/projects:
 
 ```bash
 # 1. Install (see Install for other ways)
-sudo curl -fsSL https://raw.githubusercontent.com/efnats/ccdev/v1.0.0/ccdev -o /usr/local/bin/ccdev
+sudo curl -fsSL https://raw.githubusercontent.com/efnats/ccdev/v1.0.1/ccdev -o /usr/local/bin/ccdev
 sudo chmod +x /usr/local/bin/ccdev
 
 # 2. Connect. ccdev checks the remote and offers to install byobu, mosh and claude if missing.
@@ -68,12 +68,12 @@ Help: `ccdev -h` for the essentials, `ccdev --help` for all options and your cur
 
 ```bash
 # system-wide
-sudo curl -fsSL https://raw.githubusercontent.com/efnats/ccdev/v1.0.0/ccdev -o /usr/local/bin/ccdev
+sudo curl -fsSL https://raw.githubusercontent.com/efnats/ccdev/v1.0.1/ccdev -o /usr/local/bin/ccdev
 sudo chmod +x /usr/local/bin/ccdev
 
 # or just for you (make sure ~/.local/bin is in your PATH)
 mkdir -p ~/.local/bin
-curl -fsSL https://raw.githubusercontent.com/efnats/ccdev/v1.0.0/ccdev -o ~/.local/bin/ccdev
+curl -fsSL https://raw.githubusercontent.com/efnats/ccdev/v1.0.1/ccdev -o ~/.local/bin/ccdev
 chmod +x ~/.local/bin/ccdev
 
 ccdev --version
