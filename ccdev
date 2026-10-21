@@ -10,7 +10,7 @@ NO_SCREENSHOTS=0
 NEW_SESSION=0
 SYNC_AUTH=0
 SERVER_CMD=""
-BASE_DIR=""      # Projekt-Basisverzeichnis auf dem Remote (leer = dessen $HOME)
+BASE_DIR="${CCDEV_BASE:-}"   # Projekt-Basisverzeichnis auf dem Remote (--base > $CCDEV_BASE > dessen $HOME)
 RESTORE=0
 # Screenshot-Verzeichnis: per --screenshot-dir / CCDEV_SCREENSHOT_DIR überschreibbar.
 # Fallback: $HOME/Pictures/Screenshots, bei root ggf. das des aufrufenden Users (SUDO_USER).
@@ -36,7 +36,7 @@ Options:
       --no-screenshots  Disable automatic screenshot sync
       --new             Start a new Claude session (skip --resume)
       --base DIR        Remote base dir for projects (subdirs with CLAUDE.md or .ccdev;
-                        default: remote \$HOME)
+                        default: \$CCDEV_BASE, else remote \$HOME)
       --restore         Start byobu sessions for all projects not running yet
                         (claude --continue), then show the session menu
       --sync-auth       Sync local Claude auth to remote host
