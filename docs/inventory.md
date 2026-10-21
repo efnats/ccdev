@@ -5,9 +5,9 @@ The host inventory lets you connect by name instead of address. ccdev reads name
 ```bash
 ccdev --init           # interactive setup
 ccdev                  # menu of all targets, grouped by source
-ccdev seedhodler       # exact name, else unique prefix (e.g. seedhodler-dev)
-ccdev proxmox/claude   # SOURCE/NAME when two sources share a name
-ccdev seedhodler /root/claude/seedhodler   # a name works like a host, also with a project dir
+ccdev api              # exact name, else unique prefix (api-dev)
+ccdev servers/web1     # SOURCE/NAME: only look in one source
+ccdev web-dev /srv/shop   # a name works like a host, also with a project dir
 ```
 
 ## Name resolution

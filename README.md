@@ -8,21 +8,21 @@ ccdev connects to a remote host over mosh (or ssh), keeps every project in its o
 $ ccdev
 Targets:
   proxmox
-    [1] diskmind-dev       root@192.168.1.219       CT108 pve1
-    [2] claude             root@192.168.1.105       CT111 pve1
-    [3] seedhodler-dev     root@192.168.1.230       CT120 pve1
+    [1] api-dev            root@192.168.1.21        CT101 pve1
+    [2] web-dev            root@192.168.1.22        CT102 pve1
+    [3] ml-box             root@192.168.1.30        VM200 pve2
   servers
     [4] web1               deploy@203.0.113.10      Hetzner
 Choice: 2
 
 Running byobu sessions:
 ──────────────────────────────────────
-  [1] homelab: 1 windows (created Tue Oct 21 19:03:33 2026)
-  [2] email: 1 windows (created Tue Oct 21 19:03:33 2026)
-Saved projects (not started) in /root/claude:
+  [1] shop: 1 windows (created Tue Oct 21 09:12:40 2026)
+  [2] blog: 1 windows (created Tue Oct 21 09:12:41 2026)
+Saved projects (not started) in /root/projects:
 ──────────────────────────────────────
-  [3] ollion         /root/claude/ollion, last used 2026-10-20
-  [4] mbc            /root/claude/mbc, no history yet
+  [3] api            /root/projects/api, last used 2026-10-20
+  [4] docs           /root/projects/docs, no history yet
 ──────────────────────────────────────
   [r] Start all saved projects
   [n] New session
@@ -110,7 +110,7 @@ ccdev --restore root@192.168.1.10          # after a reboot: start all saved pro
 ccdev --base /srv/work root@192.168.1.10   # look for projects in another directory
 ```
 
-The base dir defaults to the remote `$HOME`. `CCDEV_BASE` sets it for all hosts; a relative value is taken from the remote `$HOME`, so `export CCDEV_BASE=claude` means `/root/claude` for root and `/home/alice/claude` for alice.
+The base dir defaults to the remote `$HOME`. `CCDEV_BASE` sets it for all hosts; a relative value is taken from the remote `$HOME`, so `export CCDEV_BASE=projects` means `/root/projects` for root and `/home/alice/projects` for alice.
 
 When you give a directory (`ccdev host /opt/app`) and no session is running on the host yet, ccdev starts a session for it right away (`claude --resume`, or `claude` with `--new`). If sessions are running, it shows the menu; `[n]` creates the session, named after the directory by default.
 
@@ -121,8 +121,8 @@ Name your machines once and connect by name:
 ```bash
 ccdev --init           # interactive setup, writes ~/.config/ccdev/config
 ccdev                  # menu of all targets
-ccdev seedhodler       # exact name, else unique prefix (seedhodler-dev)
-ccdev proxmox/claude   # SOURCE/NAME when two sources share a name
+ccdev api              # exact name, else unique prefix (api-dev)
+ccdev servers/web1     # SOURCE/NAME: only look in one source
 ccdev --list json      # for scripts (also: table, tsv)
 ```
 
