@@ -6,13 +6,14 @@ Connect to a remote Claude Code dev session via mosh/ssh with automatic byobu se
 
 - **mosh/ssh connection** with automatic fallback to ssh if mosh is unavailable
 - **Byobu session manager** - attach, create, or kill sessions interactively
-- **Auto-resume** - reconnects to your last Claude session (`claude --resume`)
+- **Project discovery** - lists project dirs on the remote (with `CLAUDE.md` or `.ccdev`) and starts one byobu session per project; `--restore` brings them all back after a reboot
+- **Auto-resume** - reconnects to your last Claude session (`claude --resume`, or `claude --continue` for projects)
 - **Remote dependency check** - detects and offers to install missing tools (byobu, mosh-server, claude)
 - **Screenshot sync** - watches a local screenshot directory and copies new files to the remote host via scp
 - **`/ss` slash command** - automatically creates a Claude custom command on the remote to read the latest screenshot
 - **Auth sync** - optionally transfer local Claude credentials to the remote host
 - **Dev server split-pane** - automatically splits the terminal when a `.ccdev` config is found in the project directory
-- **Host inventory** - pick targets by name from static lists, `~/.ssh/config`, Proxmox tags or any command
+- **Host inventory** - pick targets by name from static lists, `~/.ssh/config`, Proxmox tags (containers and VMs) or any command; cached, with tab completion
 
 ## Install
 
@@ -33,10 +34,15 @@ ccdev [OPTIONS] [name] [dir]      # with a host inventory
 |---|---|
 | `-u, --user USER` | SSH username (overrides user in user@host) |
 | `-d, --dir DIR` | Directory to cd into on the remote before starting Claude |
+| `-n, --name NAME` | byobu session name (default: basename of dir, else `claude`) |
 | `-s, --server CMD` | Dev server command (overrides `.ccdev` config on remote) |
+| `-S, --screenshot-dir DIR` | Local screenshot dir to watch (default: `~/Pictures/Screenshots` or `$CCDEV_SCREENSHOT_DIR`) |
 | `--no-screenshots` | Disable automatic screenshot sync |
 | `--new` | Start a new Claude session (skip --resume) |
+| `--base DIR` | Remote base dir for projects (default: `$CCDEV_BASE`, else remote `$HOME`; relative paths start at the remote `$HOME`) |
+| `--restore` | Start byobu sessions for all projects not running yet, then show the session menu |
 | `--sync-auth` | Sync local Claude auth (~/.claude/) to remote host |
+| `--init` | Set up the host inventory interactively |
 | `--refresh` | Query the host inventory live, ignoring the cache |
 | `--list [table\|tsv\|json]` | Print the host inventory and exit |
 | `--completion bash` | Print a bash completion script |
@@ -64,9 +70,30 @@ ccdev --sync-auth root@192.168.1.10
 ccdev root@192.168.1.10 /opt/myproject --server "npm run dev"
 ```
 
+## Projects and sessions
+
+Without a directory, ccdev shows the byobu session manager on the remote: running sessions, plus **saved projects** that are not running yet. A project is any subdirectory of the base dir that contains a `CLAUDE.md` or a `.ccdev` file. Picking one starts a byobu session named after the directory and runs `claude --continue` there (or `claude` if the project has no history yet).
+
+```bash
+ccdev root@192.168.1.10                          # session manager with running sessions and saved projects
+ccdev root@192.168.1.10 /opt/myproject           # straight into one project (byobu session "myproject")
+ccdev --restore root@192.168.1.10                # after a reboot: start all saved projects, then the menu
+ccdev --base /srv/work root@192.168.1.10         # look for projects somewhere else
+```
+
+The base dir defaults to the remote `$HOME`. Set `CCDEV_BASE` to change it for every host; a relative value is taken from the remote `$HOME`, so `export CCDEV_BASE=claude` means `/root/claude` for root and `/home/alice/claude` for alice.
+
 ## Host inventory
 
-Instead of remembering addresses, ccdev can read named targets from one or more sources. Without a host it shows all of them to pick from; with a short name it connects directly:
+Instead of remembering addresses, ccdev can read named targets from one or more sources. Without a host it shows all of them to pick from; with a short name it connects directly. The quickest way to set it up is the interactive wizard:
+
+```bash
+ccdev --init
+```
+
+It asks for the sources, checks Proxmox nodes and commands right away, shows the resulting file before saving (an existing one is extended or backed up) and can add tab completion to `~/.bashrc`. Authentication is up to you: ccdev uses plain `ssh`, so keys and `~/.ssh/config` work as usual.
+
+Using it:
 
 ```bash
 ccdev                  # menu of all targets, grouped by source
@@ -77,7 +104,7 @@ ccdev seedhodler /root/claude/seedhodler   # name plus project dir works as with
 
 A host containing `.`, `@` or `:` always goes to ssh unchanged, and so does a name that matches nothing. Sources are queried in parallel; a failing source only prints a warning.
 
-Configure the sources in `~/.config/ccdev/config` (or the file named by `$CCDEV_CONFIG`):
+The sources live in `~/.config/ccdev/config` (or the file named by `$CCDEV_CONFIG`); `ccdev --init` writes it, and you can edit it by hand:
 
 ```ini
 # Fixed hosts
@@ -134,12 +161,13 @@ zsh users can load it after `autoload -U bashcompinit && bashcompinit`.
 
 ## How it works
 
-1. Checks local dependencies (mosh, ssh, scp)
-2. Verifies remote dependencies (byobu, mosh-server, claude) - offers to install if missing
-3. Optionally syncs Claude auth credentials (`--sync-auth`)
-4. Starts a screenshot watcher (if `inotifywait` is available)
-5. Creates a `/ss` slash command on the remote for screenshot access
-6. Connects via mosh (or ssh fallback) and presents the byobu session manager
+1. Resolves the target: a host as given, or a name from the host inventory (menu if none is given)
+2. Checks local dependencies (mosh, ssh, scp)
+3. Verifies remote dependencies (byobu, mosh-server, claude) - offers to install if missing
+4. Optionally syncs Claude auth credentials (`--sync-auth`)
+5. Starts a screenshot watcher (if `inotifywait` is available)
+6. Creates a `/ss` slash command on the remote for screenshot access
+7. Connects via mosh (or ssh fallback) and presents the byobu session manager with running sessions and saved projects
 
 ## Screenshot sync
 
@@ -174,9 +202,11 @@ You can also override this from the CLI with `--server CMD`.
 ## Requirements
 
 **Local (client):**
+- bash 4.4 or newer (on macOS: `brew install bash`)
 - mosh (optional, falls back to ssh)
 - ssh, scp
 - inotifywait (optional, for screenshot sync - `apt install inotify-tools`)
+- column (optional, for `--list` tables), bash-completion (optional, adds known SSH hosts to tab completion)
 
 **Remote (server):**
 - byobu
@@ -184,6 +214,8 @@ You can also override this from the CLI with `--server CMD`.
 - claude (Claude Code CLI)
 
 Missing remote dependencies are detected automatically and can be installed interactively.
+
+**Proxmox source (`proxmox-ssh`):** SSH access to a node that has `pvesh` and `python3` (both standard on Proxmox VE); for VM addresses the QEMU guest agent inside the VM.
 
 ## License
 

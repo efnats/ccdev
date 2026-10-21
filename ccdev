@@ -17,6 +17,7 @@ CONFIG_FILE="${CCDEV_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/ccdev/config}"
 CACHE_FILE="${XDG_CACHE_HOME:-$HOME/.cache}/ccdev/inventory.tsv"
 CACHE_TTL=300   # Sekunden, in denen der Cache ohne Live-Abfrage gilt ([settings] cache_ttl; 0 = immer live)
 REFRESH=0       # --refresh
+INIT=0          # --init
 LIST_FMT=""     # --list table|tsv|json, intern names (für die Vervollständigung)
 INV_NOTE=""     # Herkunft der zuletzt gelesenen Liste, z. B. "Cache, vor 2 min"
 # Screenshot-Verzeichnis: per --screenshot-dir / CCDEV_SCREENSHOT_DIR überschreibbar.
@@ -49,6 +50,7 @@ Options:
       --restore         Start byobu sessions for all projects not running yet
                         (claude --continue), then show the session menu
       --sync-auth       Sync local Claude auth to remote host
+      --init            Set up the host inventory interactively
       --refresh         Query the host inventory live, ignoring the cache
       --list [FMT]      Print the host inventory (table, tsv or json) and exit
       --completion bash Print a bash completion script (eval it in ~/.bashrc)
@@ -101,7 +103,7 @@ _ccdev() {
   esac
   if [[ "$cur" == -* ]]; then
     COMPREPLY=($(compgen -W "-u --user -d --dir -n --name -s --server -S --screenshot-dir --no-screenshots
-      --new --base --restore --sync-auth --refresh --list --completion -h --help" -- "$cur"))
+      --new --base --restore --sync-auth --init --refresh --list --completion -h --help" -- "$cur"))
     return
   fi
   # nur das erste Positionsargument (Host oder Name) vervollständigen
@@ -172,6 +174,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --refresh)
       REFRESH=1
+      shift
+      ;;
+    --init)
+      INIT=1
       shift
       ;;
     --list)
@@ -508,6 +514,162 @@ pick_target() {
   TARGET="$target"
 }
 
+# --- ccdev --init: Host-Inventar interaktiv einrichten ---
+ask() {   # ask VAR "Frage" [Vorgabe]
+  local v=""
+  read -rp "$2${3:+ [$3]}: " v </dev/tty || true
+  printf -v "$1" '%s' "${v:-${3:-}}"
+}
+
+# Name für eine neue Quelle erfragen; nicht leer, ohne ], nicht schon vergeben ($1 = Vorschlag, $2 = Datei mit
+# den neuen Blöcken; beim Ergänzen zählen auch die Quellen der vorhandenen Datei, INIT_KEEP)
+ask_source_name() {
+  local n
+  while true; do
+    ask n "  Name der Quelle (erscheint im Menü)" "$1"
+    if [[ -z "$n" || "$n" == *[][[:space:]/]* ]]; then
+      echo "  Bitte einen Namen ohne Leerzeichen, / und Klammern."
+    elif grep -qxF "[source $n]" "$2" ${INIT_KEEP:+"$INIT_KEEP"} 2>/dev/null; then
+      echo "  Eine Quelle '$n' gibt es schon."
+    else
+      SRC_NEW_NAME="$n"; return
+    fi
+  done
+}
+
+init_static() {
+  local name target info n=0
+  echo "  Hosts eingeben (Name leer lassen zum Beenden). Ziel z. B. root@192.168.1.10 oder ein ssh-Alias." >&2
+  while true; do
+    ask name "  Name"
+    [[ -z "$name" ]] && break
+    [[ "$name" == *[.@:[:space:]]* ]] && { echo "  Namen ohne . @ : und Leerzeichen, sonst lässt er sich nicht per Name aufrufen." >&2; continue; }
+    ask target "  Ziel für $name"
+    [[ -n "$target" ]] || { echo "  Ohne Ziel übersprungen." >&2; continue; }
+    ask info "  Info (optional)"
+    echo "host = $name $target${info:+ $info}"
+    n=$((n + 1))
+  done
+  [[ $n -gt 0 ]]
+}
+
+# shellcheck disable=SC2254  # match-Werte sind bewusst Muster
+init_ssh_config() {
+  local f="$HOME/.ssh/config" aliases match hits=0 a m
+  [[ -f "$f" ]] || { echo "  $f gibt es nicht." >&2; return 1; }
+  aliases=$(awk 'tolower($1) == "host" {for (i = 2; i <= NF && $i !~ /^#/; i++) if ($i !~ /[*?!]/) print $i}' "$f")
+  [[ -n "$aliases" ]] || { echo "  Keine Host-Aliase in $f." >&2; return 1; }
+  echo "  Host-Aliase in $f:" $aliases >&2
+  ask match "  Welche übernehmen? Muster, durch Leerzeichen getrennt" "*"
+  local -; set -f
+  for a in $aliases; do for m in $match; do case "$a" in $m) hits=$((hits + 1)); break ;; esac; done; done
+  echo "  → $hits Alias(e) passen." >&2
+  echo "match = $match"
+}
+
+init_proxmox() {
+  local nodes tag user types n ok=0
+  ask nodes "  SSH-Ziele der Proxmox-Knoten, durch Leerzeichen getrennt" "${CCDEV_PVE:-root@}"
+  [[ -n "$nodes" && "$nodes" != root@ ]] || { echo "  Ohne Knoten keine Quelle." >&2; return 1; }
+  for n in $nodes; do
+    if ssh -o BatchMode=yes -o ConnectTimeout=5 "$n" 'command -v pvesh >/dev/null && command -v python3 >/dev/null' 2>/dev/null; then
+      echo "  ✓ $n erreichbar (pvesh, python3)" >&2; ok=1
+    else
+      echo "  ✗ $n nicht erreichbar oder ohne pvesh/python3 (SSH-Schlüssel ohne Passwortabfrage nötig)" >&2
+    fi
+  done
+  [[ $ok -eq 1 ]] || { local go; ask go "  Trotzdem übernehmen? [j/N]"; [[ "$go" == [jJyY]* ]] || return 1; }
+  ask tag "  Tag der Gäste" "${CCDEV_PVE_TAG:-claude}"
+  ask types "  Container und/oder VMs (lxc qemu)" "lxc qemu"
+  ask user "  Login-Benutzer für die Gäste" "${CCDEV_PVE_USER:-root}"
+  printf 'nodes = %s\ntag   = %s\ntypes = %s\nuser  = %s\n' "$nodes" "$tag" "$types" "$user"
+}
+
+init_command() {
+  local run out
+  echo "  Das Programm gibt pro Ziel eine Zeile aus: NAME<TAB>ZIEL[<TAB>STATUS[<TAB>INFO]]" >&2
+  ask run "  Befehl"
+  [[ -n "$run" ]] || return 1
+  out=$( (command -v timeout &>/dev/null && timeout 20 bash -c "$run" || bash -c "$run") 2>&1 ) || true
+  echo "  Probelauf, $(grep -c . <<<"$out") Zeile(n), Anfang:" >&2
+  head -5 <<<"$out" | sed 's/\t/ → /g; s/^/    /' >&2
+  grep -q $'\t' <<<"$out" || echo "  ⚠ Keine Tabulatoren in der Ausgabe, das Format stimmt wohl noch nicht." >&2
+  echo "run  = $run"
+}
+
+init_config() {
+  local new mode=new c fn type body go
+  INIT_KEEP=""
+  [[ -r /dev/tty ]] || { echo "Error: --init needs a terminal." >&2; exit 1; }
+  new=$(mktemp)
+  echo "ccdev: Host-Inventar einrichten ($CONFIG_FILE)"
+  echo "Die Anmeldung an den Zielen (SSH-Schlüssel, ~/.ssh/config) richtest du selbst ein."
+  if [[ -f "$CONFIG_FILE" ]]; then
+    echo; echo "Vorhandene Konfiguration:"; sed 's/^/  | /' "$CONFIG_FILE"; echo
+    ask c "[e]rgänzen, [n]eu anlegen (alte wird gesichert), [a]bbrechen" e
+    case "$c" in e|E) mode=append; INIT_KEEP="$CONFIG_FILE" ;; n|N) mode=new ;; *) echo "Abgebrochen."; rm -f "$new"; exit 0 ;; esac
+  elif [[ -n "${CCDEV_PVE:-}" ]]; then
+    echo "Hinweis: CCDEV_PVE ist gesetzt; die Proxmox-Quelle übernimmt die Werte als Vorschlag."
+  fi
+  while true; do
+    echo
+    echo "Quelle hinzufügen:"
+    echo "  [1] static       feste Liste von Hosts"
+    echo "  [2] ssh-config   Host-Aliase aus ~/.ssh/config"
+    echo "  [3] proxmox-ssh  Proxmox-Container/VMs mit Tag (pvesh über SSH)"
+    echo "  [4] command      eigenes Programm liefert die Liste"
+    echo "  [f] fertig"
+    ask c "Wahl" f
+    case "$c" in
+      1) type="static";      fn=init_static;     ask_source_name servers "$new" ;;
+      2) type="ssh-config";  fn=init_ssh_config; ask_source_name ssh "$new" ;;
+      3) type="proxmox-ssh"; fn=init_proxmox;    ask_source_name proxmox "$new" ;;
+      4) type="command";     fn=init_command;    ask_source_name cmd "$new" ;;
+      f|F) break ;;
+      *) echo "Ungültige Eingabe."; continue ;;
+    esac
+    if body=$("$fn"); then
+      printf '\n[source %s]\ntype = %s\n%s\n' "$SRC_NEW_NAME" "$type" "$body" >>"$new"
+      echo "  ✓ Quelle '$SRC_NEW_NAME' vorgemerkt."
+    else
+      echo "  Quelle verworfen."
+    fi
+  done
+  if [[ ! -s "$new" ]]; then echo "Keine Quelle angelegt, nichts geändert."; rm -f "$new"; exit 0; fi
+  echo; echo "Wird $([[ $mode == append ]] && echo "angehängt an" || echo "geschrieben nach") $CONFIG_FILE:"
+  sed 's/^/  | /' "$new"
+  ask go "Speichern? [J/n]" j
+  [[ "$go" == [jJyY]* ]] || { echo "Nichts geändert."; rm -f "$new"; exit 0; }
+  mkdir -p "$(dirname "$CONFIG_FILE")"
+  if [[ $mode == new ]]; then
+    if [[ -f "$CONFIG_FILE" ]]; then
+      local bak; bak="$CONFIG_FILE.bak-$(date +%Y%m%d-%H%M%S)"
+      cp -p "$CONFIG_FILE" "$bak"
+      echo "Alte Konfiguration gesichert: $bak"
+    fi
+    { echo "# ccdev host inventory, created by ccdev --init (see ccdev --help)"; cat "$new"; } >"$CONFIG_FILE"
+  else
+    cat "$new" >>"$CONFIG_FILE"
+  fi
+  rm -f "$new"
+  echo "✓ Gespeichert. Aktueller Stand:"; echo
+  REFRESH=1; SRC_NAME=(); SRC_TYPE=(); SRC_OPT=()
+  load_config
+  list_inventory table || true
+  if [[ -f "$HOME/.bashrc" ]] && ! grep -q 'ccdev --completion' "$HOME/.bashrc"; then
+    echo; ask go "Tab-Vervollständigung in ~/.bashrc eintragen? [j/N]"
+    if [[ "$go" == [jJyY]* ]]; then
+      printf '\n# ccdev: Tab-Vervollständigung\neval "$(ccdev --completion bash 2>/dev/null)"\n' >>"$HOME/.bashrc"
+      echo "✓ Eingetragen, wirkt in neuen Shells."
+    fi
+  fi
+  echo; echo "Fertig. Aufruf: ccdev (Menü) oder ccdev NAME."
+}
+
+if [[ $INIT -eq 1 ]]; then
+  init_config
+  exit 0
+fi
 load_config
 if [[ -n "$LIST_FMT" ]]; then
   list_inventory "$LIST_FMT"
