@@ -3,6 +3,7 @@
 
 set -euo pipefail
 
+VERSION="1.0.0"
 BYOBU_SESSION=""
 USER_OVERRIDE=""
 REMOTE_DIR=""
@@ -12,6 +13,8 @@ SYNC_AUTH=0
 SERVER_CMD=""
 BASE_DIR="${CCDEV_BASE:-}"   # Projekt-Basisverzeichnis auf dem Remote (--base > $CCDEV_BASE > dessen $HOME)
 RESTORE=0
+PERM_MODE=""    # --mode / [settings] permission_mode: an claude --permission-mode durchgereicht
+MODE_CLI=""
 # Inventar: benannte Ziele aus Quellen der Konfigurationsdatei (siehe usage); ccdev ohne Host zeigt sie zur Auswahl.
 CONFIG_FILE="${CCDEV_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/ccdev/config}"
 CACHE_FILE="${XDG_CACHE_HOME:-$HOME/.cache}/ccdev/inventory.tsv"
@@ -19,7 +22,7 @@ CACHE_TTL=300   # Sekunden, in denen der Cache ohne Live-Abfrage gilt ([settings
 REFRESH=0       # --refresh
 INIT=0          # --init
 LIST_FMT=""     # --list table|tsv|json, intern names (für die Vervollständigung)
-INV_NOTE=""     # Herkunft der zuletzt gelesenen Liste, z. B. "Cache, vor 2 min"
+INV_NOTE=""     # Herkunft der zuletzt gelesenen Liste, z. B. "cached 2 min ago"
 # Screenshot-Verzeichnis: per --screenshot-dir / CCDEV_SCREENSHOT_DIR überschreibbar.
 # Fallback: $HOME/Pictures/Screenshots, bei root ggf. das des aufrufenden Users (SUDO_USER).
 if [[ -n "${CCDEV_SCREENSHOT_DIR:-}" ]]; then
@@ -30,64 +33,223 @@ else
   LOCAL_SCREENSHOT_DIR="$HOME/Pictures/Screenshots"
 fi
 
-usage() {
+# --- Hilfe: -h kurz, --help vollständig mit "Your setup", --help THEMA ---
+HELP=""         # short | full | Thema; ausgegeben nach dem Einlesen der Argumente
+HELP_TOPICS="inventory projects env"
+DOCS_URL="https://github.com/efnats/ccdev"
+
+help_short() {
   cat <<EOF
-Usage: ccdev [OPTIONS] [user@]host [dir]
-       ccdev [OPTIONS] [name] [dir]     # pick from the host inventory (see below)
+ccdev $VERSION - run Claude Code on a remote host in persistent byobu sessions
 
-Options:
-  -u, --user USER       SSH username (overrides user in user@host)
-  -d, --dir  DIR        Directory to cd into on the remote before starting claude
-  -n, --name NAME       byobu session name (default: basename of dir, else "claude")
-  -s, --server CMD      Dev server command (overrides .ccdev on remote)
-  -S, --screenshot-dir DIR  Local screenshot dir to watch
-                            (default: \$HOME/Pictures/Screenshots, or CCDEV_SCREENSHOT_DIR)
-      --no-screenshots  Disable automatic screenshot sync
-      --new             Start a new Claude session (skip --resume)
-      --base DIR        Remote base dir for projects (subdirs with CLAUDE.md or .ccdev;
-                        default: \$CCDEV_BASE, else remote \$HOME;
-                        relative paths are taken from the remote \$HOME)
-      --restore         Start byobu sessions for all projects not running yet
-                        (claude --continue), then show the session menu
-      --sync-auth       Sync local Claude auth to remote host
-      --init            Set up the host inventory interactively
-      --refresh         Query the host inventory live, ignoring the cache
-      --list [FMT]      Print the host inventory (table, tsv or json) and exit
-      --completion bash Print a bash completion script (eval it in ~/.bashrc)
-  -h, --help            Show this help
+Usage: ccdev [OPTIONS] [HOST|NAME] [DIR]
 
-Host inventory (optional): ~/.config/ccdev/config, or \$CCDEV_CONFIG
-  [source NAME]           one block per source, NAME is shown in the menu
-  type = static           host = NAME TARGET [INFO]       (repeatable)
-  type = ssh-config       match = GLOB...   Host aliases from ~/.ssh/config (default: *)
-                          marker = WORD     only Host lines carrying "# WORD" (optional)
-                          file = PATH...    (default: ~/.ssh/config)
-  type = proxmox-ssh      nodes = root@pve1 root@pve2     (first reachable one is used)
-                          tag = claude      guests with this tag (default: claude)
-                          types = lxc qemu  containers and/or VMs (default: both;
-                                            VM addresses need the QEMU guest agent)
-                          user = root       login user for them (default: root)
-  type = command          run = CMD         prints lines: NAME<TAB>TARGET[<TAB>STATUS[<TAB>INFO]]
-                          timeout = 20      seconds
-  [settings]              cache_ttl = 300   seconds the cached inventory is used as is,
-                                            refreshed in the background (0 = always live)
-  Cache: ~/.cache/ccdev/inventory.tsv. A failing source keeps its last cached entries.
-  Without a host, ccdev lists all targets to pick from. A host without ".", "@"
-  or ":" is first matched against the names (exact, else prefix; SOURCE/NAME
-  limits it to one source); no match goes to ssh as is.
-  Without a config file, CCDEV_PVE ("root@pve1 root@pve2"), CCDEV_PVE_TAG and
-  CCDEV_PVE_USER still define one proxmox-ssh source.
+  ccdev                         pick a host from your inventory
+  ccdev root@10.0.0.5           session manager on that host
+  ccdev myhost /opt/app         open a project (own session, Claude resumes)
+  ccdev --restore myhost        after a reboot: start all saved projects
+
+Common options:
+  -u USER       ssh user               --new        fresh Claude conversation
+  -n NAME       session name           --mode MODE  Claude permission mode (auto, plan, ...)
+  --base DIR    where projects live    --init       set up the host inventory
+  --list        show the inventory     --refresh    ignore the inventory cache
+
+More: ccdev --help (all options), ccdev --help inventory|projects|env
+Docs: $DOCS_URL
+EOF
+}
+
+help_full() {
+  cat <<EOF
+ccdev $VERSION - run Claude Code on a remote host in persistent byobu sessions
+
+Usage: ccdev [OPTIONS] [HOST|NAME] [DIR]
+
+  HOST  user@host, an address or an ssh alias
+  NAME  a target from your host inventory: exact name, unique prefix or SOURCE/NAME
+  DIR   project directory on the host; gets its own byobu session named after it
 
 Examples:
-  ccdev root@192.168.1.10
-  ccdev -u root 192.168.1.10
-  ccdev root@192.168.1.10 /opt/myproject          # byobu session "myproject"
-  ccdev -n homelab root@192.168.1.10
-  ccdev -u root 192.168.1.10 -d /opt/myproject
-  ccdev --restore root@192.168.1.10                 # after a reboot: restart all projects
+  ccdev                               pick a host from your inventory
+  ccdev root@10.0.0.5                 session manager: running sessions, saved projects
+  ccdev myhost /opt/app               open a project, Claude resumes where it left off
+  ccdev --restore myhost              after a reboot: start all saved projects
+  ccdev --mode auto myhost /opt/app   Claude works without asking, risky actions blocked
+  ccdev --list json                   the inventory for scripts
+
+Connection:
+  -u, --user USER          ssh user (overrides user@ in HOST; default: ssh decides)
+      --sync-auth          copy your local Claude login (~/.claude/.credentials.json)
+                           to the host if it has none
+
+Projects and sessions:
+  -d, --dir DIR            project directory (same as the DIR argument)
+  -n, --name NAME          byobu session name (default: name of DIR, else "claude")
+      --base DIR           where to look for projects (default: \$CCDEV_BASE, else
+                           the remote \$HOME; relative paths start at the remote \$HOME)
+      --restore            start sessions for all saved projects, then the menu
+
+Claude:
+      --new                start a new conversation instead of resuming
+      --mode MODE          permission mode, e.g. manual, acceptEdits, auto, plan
+                           (default: [settings] permission_mode, else the host's
+                           Claude settings)
+
+Host inventory:
+      --init               set up the sources interactively
+      --list [FORMAT]      print the inventory: table (default), tsv or json
+      --refresh            query the sources live instead of using the cache
+
+Screenshots and dev server:
+  -S, --screenshot-dir DIR local screenshot dir to watch
+                           (default: \$CCDEV_SCREENSHOT_DIR, else ~/Pictures/Screenshots)
+      --no-screenshots     don't copy screenshots to the host
+  -s, --server CMD         run CMD in a split pane next to Claude (overrides .ccdev)
+
+Other:
+  -h                       short help
+      --help [TOPIC]       this help, or a topic: ${HELP_TOPICS// /, }
+      --completion bash    print the bash completion script
+      --version            print the version
+
 EOF
-  exit 0
+  help_setup
+  cat <<EOF
+
+More: ccdev --help inventory|projects|env
+Docs: $DOCS_URL (config format: docs/inventory.md)
+EOF
 }
+
+# Aktueller Stand, ohne Netzwerkzugriff
+help_setup() {
+  local h="$HOME" n age names
+  names=$(IFS=,; echo "${SRC_NAME[*]}"); names="${names//,/, }"
+  echo "Your setup:"
+  if [[ -f "$CONFIG_FILE" ]]; then
+    printf '  %-12s %s (%d source(s)%s)\n' "config" "${CONFIG_FILE/#$h/\~}" "${#SRC_NAME[@]}" \
+      "${names:+: $names}"
+  elif [[ ${#SRC_NAME[@]} -gt 0 ]]; then
+    printf '  %-12s %s\n' "config" "none, CCDEV_PVE defines one proxmox source"
+  else
+    printf '  %-12s %s\n' "config" "none (ccdev --init sets up a host inventory)"
+  fi
+  if [[ -s "$CACHE_FILE" ]]; then
+    n=$(grep -c . "$CACHE_FILE"); age=$(cache_age)
+    printf '  %-12s %s (%d target(s), %s old)\n' "cache" "${CACHE_FILE/#$h/\~}" "$n" \
+      "$( (( age < 120 )) && echo "${age} s" || echo "$((age / 60)) min")"
+  fi
+  if [[ -n "${CCDEV_BASE:-}" ]]; then
+    printf '  %-12s %s\n' "CCDEV_BASE" "$CCDEV_BASE$([[ "$CCDEV_BASE" != /* ]] && echo " (~/$CCDEV_BASE on each host)")"
+  else
+    printf '  %-12s %s\n' "CCDEV_BASE" "not set (projects in the remote \$HOME)"
+  fi
+  printf '  %-12s %s\n' "mode" "${PERM_MODE:-not set (Claude settings on the host decide)}"
+}
+
+help_topic() {
+  case "$1" in
+    inventory) cat <<'TOPIC'
+ccdev host inventory: connect by name instead of address
+
+  ccdev                    menu of all targets, grouped by source
+  ccdev NAME               exact name, else unique prefix; several hits show a menu
+  ccdev SOURCE/NAME        only look in one source
+  ccdev --init             set up the sources interactively
+  ccdev --list [FORMAT]    table, tsv or json      ccdev --refresh   skip the cache
+
+A HOST containing ".", "@" or ":" always goes to ssh unchanged, and so does a
+NAME that matches nothing. Stopped targets are shown as (off), running guests
+without an address as (no IP).
+
+Config file: ~/.config/ccdev/config (or $CCDEV_CONFIG), one block per source:
+
+  [source NAME]          NAME is shown in the menu and used for SOURCE/NAME
+  type = static          host = NAME TARGET [INFO]          (repeatable)
+  type = ssh-config      match = GLOB...    Host aliases from ~/.ssh/config (default: *)
+                         marker = WORD      only Host lines carrying "# WORD"
+                         file = PATH...     (default: ~/.ssh/config)
+  type = proxmox-ssh     nodes = root@pve1 root@pve2   (first reachable one is used)
+                         tag = claude       guests with this tag (default: claude)
+                         types = lxc qemu   containers and/or VMs (default: both;
+                                            VM addresses need the QEMU guest agent)
+                         user = root        login user for the guests (default: root)
+  type = command         run = CMD          prints NAME<TAB>TARGET[<TAB>STATUS[<TAB>INFO]]
+                         timeout = 20       seconds
+
+  [settings]             cache_ttl = 300          seconds the cache is used as is
+                                                  (0 = always query live)
+                         permission_mode = auto   default for --mode
+
+Comments start with # or ;, also at the end of a line except in run.
+Cache: ~/.cache/ccdev/inventory.tsv, refreshed in the background; a failing
+source keeps its last entries, marked (cached).
+Without a config file, CCDEV_PVE ("root@pve1 root@pve2"), CCDEV_PVE_TAG and
+CCDEV_PVE_USER define one proxmox-ssh source.
+TOPIC
+      ;;
+    projects) cat <<'TOPIC'
+ccdev projects and sessions
+
+A project is a subdirectory of the base dir on the host that contains a
+CLAUDE.md or a .ccdev file. Every project gets its own byobu session, named
+after the directory.
+
+  ccdev HOST               menu: running sessions, then saved projects (not running)
+  ccdev HOST DIR           no session running yet: start DIR's session right away
+                           (claude --resume); otherwise the menu, where [n] creates it
+  ccdev --restore HOST     start all saved projects (after a reboot), then the menu
+  ccdev --base DIR HOST    look for projects in DIR
+
+Menu keys: a number attaches to a session or starts a project, [r] starts all
+saved projects, [n] creates a new session, [q] quits; for a session [a]ttach,
+[k]ill or [b]ack.
+
+Saved projects start with "claude --continue" (plain "claude" without history).
+The base dir defaults to the remote $HOME; CCDEV_BASE or --base change it, and
+a relative value starts at the remote $HOME (CCDEV_BASE=claude is /root/claude
+for root, /home/alice/claude for alice).
+
+Dev server: a .ccdev file in the project with SERVER_CMD="npm run dev" splits
+new sessions, Claude on the left, the server on the right (or --server CMD).
+TOPIC
+      ;;
+    env) cat <<'TOPIC'
+ccdev environment and files
+
+Environment:
+  CCDEV_BASE             default for --base (relative to the remote $HOME)
+  CCDEV_CONFIG           inventory config file (default ~/.config/ccdev/config)
+  CCDEV_SCREENSHOT_DIR   default for --screenshot-dir
+  CCDEV_PVE, CCDEV_PVE_TAG, CCDEV_PVE_USER
+                         legacy: one proxmox-ssh source when there is no config file
+  XDG_CONFIG_HOME, XDG_CACHE_HOME   respected for config and cache
+
+Local files:
+  ~/.config/ccdev/config           host inventory and settings
+  ~/.cache/ccdev/inventory.tsv     inventory cache
+
+On the host:
+  <project>/.claude/commands/ss.md, or ~/.claude/commands/ss.md    the /ss command
+  <project>/screenshots/, or ~/screenshots/, and cc-watcher.log     copied screenshots
+  ~/.claude/.credentials.json                                       only with --sync-auth
+  byobu sessions, one per project or name
+
+Tools are only installed on the host after you confirm a prompt (sudo apt-get,
+Node.js via NodeSource, claude via npm into ~/.npm-global).
+TOPIC
+      ;;
+    *)
+      echo "ccdev: no help topic '$1'. Topics: $HELP_TOPICS" >&2
+      exit 2
+      ;;
+  esac
+}
+
+# Kurze Fehlermeldung statt der ganzen Hilfe
+die_usage() { echo "ccdev: $1" >&2; echo "Try 'ccdev -h' or 'ccdev --help'." >&2; exit 2; }
+need_arg() { [[ $# -ge 2 && -n "$2" && "$2" != -* ]] || die_usage "$1 needs a value"; }
 
 completion_script() {
   [[ "$1" == bash ]] || { echo "Error: only bash is supported (zsh: autoload bashcompinit; bashcompinit)." >&2; exit 1; }
@@ -100,17 +262,19 @@ _ccdev() {
     -S|--screenshot-dir) COMPREPLY=($(compgen -d -- "$cur")); return ;;
     --list) COMPREPLY=($(compgen -W "table tsv json" -- "$cur")); return ;;
     --completion) COMPREPLY=($(compgen -W "bash" -- "$cur")); return ;;
+    --help) COMPREPLY=($(compgen -W "inventory projects env" -- "$cur")); return ;;
+    --mode) COMPREPLY=($(compgen -W "manual acceptEdits auto plan dontAsk bypassPermissions" -- "$cur")); return ;;
   esac
   if [[ "$cur" == -* ]]; then
     COMPREPLY=($(compgen -W "-u --user -d --dir -n --name -s --server -S --screenshot-dir --no-screenshots
-      --new --base --restore --sync-auth --init --refresh --list --completion -h --help" -- "$cur"))
+      --new --base --restore --sync-auth --mode --init --refresh --list --completion -h --help --version" -- "$cur"))
     return
   fi
   # nur das erste Positionsargument (Host oder Name) vervollständigen
   for ((i = 1; i < COMP_CWORD; i++)); do
     w="${COMP_WORDS[i]}"
     case "$w" in
-      -u|--user|-d|--dir|-n|--name|-s|--server|-S|--screenshot-dir|--base|--completion) ((i++)) ;;
+      -u|--user|-d|--dir|-n|--name|-s|--server|-S|--screenshot-dir|--base|--completion|--mode) ((i++)) ;;
       -*) ;;
       *) n=$((n + 1)) ;;
     esac
@@ -133,22 +297,27 @@ POSITIONAL=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -u|--user)
+      need_arg "$@"
       USER_OVERRIDE="$2"
       shift 2
       ;;
     -d|--dir)
+      need_arg "$@"
       REMOTE_DIR="$2"
       shift 2
       ;;
     -n|--name)
+      need_arg "$@"
       BYOBU_SESSION="$2"
       shift 2
       ;;
     -s|--server)
+      need_arg "$@"
       SERVER_CMD="$2"
       shift 2
       ;;
     -S|--screenshot-dir)
+      need_arg "$@"
       LOCAL_SCREENSHOT_DIR="$2"
       shift 2
       ;;
@@ -165,12 +334,22 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --base)
+      need_arg "$@"
       BASE_DIR="$2"
       shift 2
       ;;
     --restore)
       RESTORE=1
       shift
+      ;;
+    --mode)
+      need_arg "$@"
+      MODE_CLI="$2"
+      shift 2
+      ;;
+    --version)
+      echo "ccdev $VERSION"
+      exit 0
       ;;
     --refresh)
       REFRESH=1
@@ -193,12 +372,17 @@ while [[ $# -gt 0 ]]; do
       completion_script "${2:-bash}"
       exit 0
       ;;
-    -h|--help)
-      usage
+    -h)
+      HELP=short
+      shift
+      ;;
+    --help)
+      HELP=full
+      if [[ -n "${2:-}" && "$2" != -* ]]; then HELP="$2"; shift; fi   # Thema, unbekannte meldet help_topic
+      shift
       ;;
     -*)
-      echo "Unknown option: $1" >&2
-      usage
+      die_usage "unknown option: $1"
       ;;
     *)
       POSITIONAL+=("$1")
@@ -230,6 +414,7 @@ load_config() {
         if [[ $i -eq -2 ]]; then
           case "$key" in
             cache_ttl) [[ "$val" =~ ^[0-9]+$ ]] && CACHE_TTL="$val" || echo "Warning: $CONFIG_FILE:$n cache_ttl must be a number" >&2 ;;
+            permission_mode) PERM_MODE="$val" ;;
             *) echo "Warning: $CONFIG_FILE:$n unknown setting: $key" >&2 ;;
           esac
         elif [[ "$key" == type ]]; then
@@ -306,17 +491,17 @@ def addr(r):   # (IP oder "-", Hinweis)
         for i in get("/nodes/%s/lxc/%s/interfaces" % (r["node"], r["vmid"])) or []:
             if i.get("name") != "lo" and i.get("inet"):
                 return i["inet"].split("/")[0], ""
-        return "-", "keine IPv4"
+        return "-", "no IPv4"
     res = get("/nodes/%s/qemu/%s/agent/network-get-interfaces" % (r["node"], r["vmid"]))
     if not isinstance(res, dict) or not res.get("result"):
-        return "-", "kein Gastagent"
+        return "-", "no guest agent"
     for i in res["result"]:
         if i.get("name") == "lo":
             continue
         for a in i.get("ip-addresses") or []:
             if a.get("ip-address-type") == "ipv4" and not a.get("ip-address", "").startswith("127."):
                 return a["ip-address"], ""
-    return "-", "keine IPv4"
+    return "-", "no IPv4"
 vms = sorted((r for r in get("/cluster/resources", "--type", "vm") or []
               if r.get("type") in types and tag in (r.get("tags") or "").split(";")), key=lambda r: r["vmid"])
 with ThreadPoolExecutor(8) as ex:
@@ -380,7 +565,7 @@ cache_fresh() {
 
 # Live abfragen und den Cache schreiben; ausgefallene Quellen behalten ihre letzten Einträge aus dem Cache
 # (dann bleibt der alte Zeitstempel, damit der nächste Aufruf wieder live fragt). Ausgabe nach $1,
-# Einträge aus dem Cache dort mit "(aus Cache)" markiert.
+# Einträge aus dem Cache dort mit "(cached)" markiert.
 inventory_refresh() {
   local out="$1" tmp s
   tmp=$(mktemp -d)
@@ -395,7 +580,7 @@ inventory_refresh() {
   [[ -s "$tmp/failed" && -f "$CACHE_FILE" ]] && touch -r "$CACHE_FILE" "$CACHE_FILE.$$"
   mv -f "$CACHE_FILE.$$" "$CACHE_FILE"
   if [[ -s "$tmp/failed" ]]; then
-    awk -F'\t' -v OFS='\t' 'NR == FNR {f[$0] = 1; next} ($1 in f) {$5 = $5 ($5 == "" ? "" : " ") "(aus Cache)"} 1' \
+    awk -F'\t' -v OFS='\t' 'NR == FNR {f[$0] = 1; next} ($1 in f) {$5 = $5 ($5 == "" ? "" : " ") "(cached)"} 1' \
       "$tmp/failed" "$tmp/rows" >"$out"
   else
     cp "$tmp/rows" "$out"
@@ -421,7 +606,7 @@ inventory() {
   if [[ $REFRESH -eq 0 ]] && cache_fresh; then
     cp "$CACHE_FILE" "$1"
     age=$(cache_age)
-    if (( age < 60 )); then INV_NOTE="Cache, vor ${age} s"; else INV_NOTE="Cache, vor $((age / 60)) min"; fi
+    if (( age < 60 )); then INV_NOTE="cached ${age} s ago"; else INV_NOTE="cached $((age / 60)) min ago"; fi
     refresh_background
   else
     INV_NOTE=""
@@ -457,7 +642,7 @@ list_inventory() {
     *)
       { printf 'SOURCE\tNAME\tTARGET\tSTATUS\tINFO\n'; cat "$inv"; } \
         | if command -v column &>/dev/null; then column -t -s $'\t'; else cat; fi
-      [[ -z "$INV_NOTE" ]] || echo "($INV_NOTE, --refresh fragt live ab)" >&2
+      [[ -z "$INV_NOTE" ]] || echo "($INV_NOTE, --refresh queries live)" >&2
       ;;
   esac
   rm -f "$inv"
@@ -493,21 +678,21 @@ pick_target() {
   if [[ ${#HIT[@]} -eq 1 && -n "$want" ]]; then
     n=1
   else
-    echo "Ziele${INV_NOTE:+ ($INV_NOTE)}:"
+    echo "Targets${INV_NOTE:+ ($INV_NOTE)}:"
     for i in "${!HIT[@]}"; do
       IFS=$'\t' read -r src name target st info <<<"${HIT[$i]}"
       [[ "$src" != "$last" ]] && { echo "  $src"; last="$src"; }
-      is_up "$st" x || target="(aus)"
-      [[ "$target" == - ]] && target="(keine IP)"
+      is_up "$st" x || target="(off)"
+      [[ "$target" == - ]] && target="(no IP)"
       printf '    [%d] %-18s %-24s %s\n' $((i + 1)) "$name" "$target" "$info"
     done
-    read -rp "Auswahl: " n </dev/tty || true
-    [[ "$n" =~ ^[0-9]+$ && "$n" -ge 1 && "$n" -le ${#HIT[@]} ]] || { echo "Abbruch." >&2; exit 1; }
+    read -rp "Choice: " n </dev/tty || true
+    [[ "$n" =~ ^[0-9]+$ && "$n" -ge 1 && "$n" -le ${#HIT[@]} ]] || { echo "Aborted." >&2; exit 1; }
   fi
   IFS=$'\t' read -r src name target st info <<<"${HIT[$((n - 1))]}"
   if ! is_up "$st" "$target"; then
     if is_up "$st" x; then echo "Error: $src/$name has no address${info:+ ($info)}." >&2
-    else echo "Error: $src/$name is $st.${INV_NOTE:+ --refresh fragt live ab.}" >&2; fi
+    else echo "Error: $src/$name is $st.${INV_NOTE:+ --refresh queries live.}" >&2; fi
     exit 1
   fi
   echo "→ $name ($src${info:+, $info}): $target"
@@ -515,7 +700,7 @@ pick_target() {
 }
 
 # --- ccdev --init: Host-Inventar interaktiv einrichten ---
-ask() {   # ask VAR "Frage" [Vorgabe]
+ask() {   # ask VAR "question" [default]
   local v=""
   read -rp "$2${3:+ [$3]}: " v </dev/tty || true
   printf -v "$1" '%s' "${v:-${3:-}}"
@@ -526,11 +711,11 @@ ask() {   # ask VAR "Frage" [Vorgabe]
 ask_source_name() {
   local n
   while true; do
-    ask n "  Name der Quelle (erscheint im Menü)" "$1"
+    ask n "  Source name (shown in the menu)" "$1"
     if [[ -z "$n" || "$n" == *[][[:space:]/]* ]]; then
-      echo "  Bitte einen Namen ohne Leerzeichen, / und Klammern."
+      echo "  Please use a name without spaces, / or brackets."
     elif grep -qxF "[source $n]" "$2" ${INIT_KEEP:+"$INIT_KEEP"} 2>/dev/null; then
-      echo "  Eine Quelle '$n' gibt es schon."
+      echo "  A source '$n' already exists."
     else
       SRC_NEW_NAME="$n"; return
     fi
@@ -539,13 +724,13 @@ ask_source_name() {
 
 init_static() {
   local name target info n=0
-  echo "  Hosts eingeben (Name leer lassen zum Beenden). Ziel z. B. root@192.168.1.10 oder ein ssh-Alias." >&2
+  echo "  Enter hosts (empty name to finish). Target e.g. root@192.168.1.10 or an ssh alias." >&2
   while true; do
     ask name "  Name"
     [[ -z "$name" ]] && break
-    [[ "$name" == *[.@:[:space:]]* ]] && { echo "  Namen ohne . @ : und Leerzeichen, sonst lässt er sich nicht per Name aufrufen." >&2; continue; }
-    ask target "  Ziel für $name"
-    [[ -n "$target" ]] || { echo "  Ohne Ziel übersprungen." >&2; continue; }
+    [[ "$name" == *[.@:[:space:]]* ]] && { echo "  Names must not contain . @ : or spaces, otherwise they cannot be used as a name." >&2; continue; }
+    ask target "  Target for $name"
+    [[ -n "$target" ]] || { echo "  No target, skipped." >&2; continue; }
     ask info "  Info (optional)"
     echo "host = $name $target${info:+ $info}"
     n=$((n + 1))
@@ -556,44 +741,44 @@ init_static() {
 # shellcheck disable=SC2254  # match-Werte sind bewusst Muster
 init_ssh_config() {
   local f="$HOME/.ssh/config" aliases match hits=0 a m
-  [[ -f "$f" ]] || { echo "  $f gibt es nicht." >&2; return 1; }
+  [[ -f "$f" ]] || { echo "  $f does not exist." >&2; return 1; }
   aliases=$(awk 'tolower($1) == "host" {for (i = 2; i <= NF && $i !~ /^#/; i++) if ($i !~ /[*?!]/) print $i}' "$f")
-  [[ -n "$aliases" ]] || { echo "  Keine Host-Aliase in $f." >&2; return 1; }
-  echo "  Host-Aliase in $f:" $aliases >&2
-  ask match "  Welche übernehmen? Muster, durch Leerzeichen getrennt" "*"
+  [[ -n "$aliases" ]] || { echo "  No host aliases in $f." >&2; return 1; }
+  echo "  Host aliases in $f:" $aliases >&2
+  ask match "  Which ones? Glob patterns, space-separated" "*"
   local -; set -f
   for a in $aliases; do for m in $match; do case "$a" in $m) hits=$((hits + 1)); break ;; esac; done; done
-  echo "  → $hits Alias(e) passen." >&2
+  echo "  → $hits alias(es) match." >&2
   echo "match = $match"
 }
 
 init_proxmox() {
   local nodes tag user types n ok=0
-  ask nodes "  SSH-Ziele der Proxmox-Knoten, durch Leerzeichen getrennt" "${CCDEV_PVE:-root@}"
-  [[ -n "$nodes" && "$nodes" != root@ ]] || { echo "  Ohne Knoten keine Quelle." >&2; return 1; }
+  ask nodes "  SSH targets of the Proxmox nodes, space-separated" "${CCDEV_PVE:-root@}"
+  [[ -n "$nodes" && "$nodes" != root@ ]] || { echo "  No nodes, no source." >&2; return 1; }
   for n in $nodes; do
     if ssh -o BatchMode=yes -o ConnectTimeout=5 "$n" 'command -v pvesh >/dev/null && command -v python3 >/dev/null' 2>/dev/null; then
-      echo "  ✓ $n erreichbar (pvesh, python3)" >&2; ok=1
+      echo "  ✓ $n reachable (pvesh, python3)" >&2; ok=1
     else
-      echo "  ✗ $n nicht erreichbar oder ohne pvesh/python3 (SSH-Schlüssel ohne Passwortabfrage nötig)" >&2
+      echo "  ✗ $n not reachable or without pvesh/python3 (needs an SSH key that works without a password prompt)" >&2
     fi
   done
-  [[ $ok -eq 1 ]] || { local go; ask go "  Trotzdem übernehmen? [j/N]"; [[ "$go" == [jJyY]* ]] || return 1; }
-  ask tag "  Tag der Gäste" "${CCDEV_PVE_TAG:-claude}"
-  ask types "  Container und/oder VMs (lxc qemu)" "lxc qemu"
-  ask user "  Login-Benutzer für die Gäste" "${CCDEV_PVE_USER:-root}"
+  [[ $ok -eq 1 ]] || { local go; ask go "  Keep it anyway? [y/N]"; [[ "$go" == [jJyY]* ]] || return 1; }
+  ask tag "  Tag of the guests" "${CCDEV_PVE_TAG:-claude}"
+  ask types "  Containers and/or VMs (lxc qemu)" "lxc qemu"
+  ask user "  Login user for the guests" "${CCDEV_PVE_USER:-root}"
   printf 'nodes = %s\ntag   = %s\ntypes = %s\nuser  = %s\n' "$nodes" "$tag" "$types" "$user"
 }
 
 init_command() {
   local run out
-  echo "  Das Programm gibt pro Ziel eine Zeile aus: NAME<TAB>ZIEL[<TAB>STATUS[<TAB>INFO]]" >&2
-  ask run "  Befehl"
+  echo "  The command prints one line per target: NAME<TAB>TARGET[<TAB>STATUS[<TAB>INFO]]" >&2
+  ask run "  Command"
   [[ -n "$run" ]] || return 1
   out=$( (command -v timeout &>/dev/null && timeout 20 bash -c "$run" || bash -c "$run") 2>&1 ) || true
-  echo "  Probelauf, $(grep -c . <<<"$out") Zeile(n), Anfang:" >&2
+  echo "  Test run, $(grep -c . <<<"$out") line(s), first ones:" >&2
   head -5 <<<"$out" | sed 's/\t/ → /g; s/^/    /' >&2
-  grep -q $'\t' <<<"$out" || echo "  ⚠ Keine Tabulatoren in der Ausgabe, das Format stimmt wohl noch nicht." >&2
+  grep -q $'\t' <<<"$out" || echo "  ⚠ No tabs in the output, the format is probably not right yet." >&2
   echo "run  = $run"
 }
 
@@ -602,68 +787,68 @@ init_config() {
   INIT_KEEP=""
   [[ -r /dev/tty ]] || { echo "Error: --init needs a terminal." >&2; exit 1; }
   new=$(mktemp)
-  echo "ccdev: Host-Inventar einrichten ($CONFIG_FILE)"
-  echo "Die Anmeldung an den Zielen (SSH-Schlüssel, ~/.ssh/config) richtest du selbst ein."
+  echo "ccdev: set up the host inventory ($CONFIG_FILE)"
+  echo "Authentication to the targets (SSH keys, ~/.ssh/config) is up to you."
   if [[ -f "$CONFIG_FILE" ]]; then
-    echo; echo "Vorhandene Konfiguration:"; sed 's/^/  | /' "$CONFIG_FILE"; echo
-    ask c "[e]rgänzen, [n]eu anlegen (alte wird gesichert), [a]bbrechen" e
-    case "$c" in e|E) mode=append; INIT_KEEP="$CONFIG_FILE" ;; n|N) mode=new ;; *) echo "Abgebrochen."; rm -f "$new"; exit 0 ;; esac
+    echo; echo "Existing configuration:"; sed 's/^/  | /' "$CONFIG_FILE"; echo
+    ask c "[a]ppend, [r]eplace (the old file is backed up), [c]ancel" a
+    case "$c" in a|A) mode=append; INIT_KEEP="$CONFIG_FILE" ;; r|R) mode=new ;; *) echo "Cancelled."; rm -f "$new"; exit 0 ;; esac
   elif [[ -n "${CCDEV_PVE:-}" ]]; then
-    echo "Hinweis: CCDEV_PVE ist gesetzt; die Proxmox-Quelle übernimmt die Werte als Vorschlag."
+    echo "Note: CCDEV_PVE is set; the Proxmox source suggests its values."
   fi
   while true; do
     echo
-    echo "Quelle hinzufügen:"
-    echo "  [1] static       feste Liste von Hosts"
-    echo "  [2] ssh-config   Host-Aliase aus ~/.ssh/config"
-    echo "  [3] proxmox-ssh  Proxmox-Container/VMs mit Tag (pvesh über SSH)"
-    echo "  [4] command      eigenes Programm liefert die Liste"
-    echo "  [f] fertig"
-    ask c "Wahl" f
+    echo "Add a source:"
+    echo "  [1] static       fixed list of hosts"
+    echo "  [2] ssh-config   host aliases from ~/.ssh/config"
+    echo "  [3] proxmox-ssh  Proxmox containers/VMs with a tag (pvesh over SSH)"
+    echo "  [4] command      your own command prints the list"
+    echo "  [d] done"
+    ask c "Choice" d
     case "$c" in
       1) type="static";      fn=init_static;     ask_source_name servers "$new" ;;
       2) type="ssh-config";  fn=init_ssh_config; ask_source_name ssh "$new" ;;
       3) type="proxmox-ssh"; fn=init_proxmox;    ask_source_name proxmox "$new" ;;
       4) type="command";     fn=init_command;    ask_source_name cmd "$new" ;;
-      f|F) break ;;
-      *) echo "Ungültige Eingabe."; continue ;;
+      d|D|f|F) break ;;
+      *) echo "Invalid choice."; continue ;;
     esac
     if body=$("$fn"); then
       printf '\n[source %s]\ntype = %s\n%s\n' "$SRC_NEW_NAME" "$type" "$body" >>"$new"
-      echo "  ✓ Quelle '$SRC_NEW_NAME' vorgemerkt."
+      echo "  ✓ Source '$SRC_NEW_NAME' added."
     else
-      echo "  Quelle verworfen."
+      echo "  Source dropped."
     fi
   done
-  if [[ ! -s "$new" ]]; then echo "Keine Quelle angelegt, nichts geändert."; rm -f "$new"; exit 0; fi
-  echo; echo "Wird $([[ $mode == append ]] && echo "angehängt an" || echo "geschrieben nach") $CONFIG_FILE:"
+  if [[ ! -s "$new" ]]; then echo "No source added, nothing changed."; rm -f "$new"; exit 0; fi
+  echo; echo "To be $([[ $mode == append ]] && echo "appended to" || echo "written to") $CONFIG_FILE:"
   sed 's/^/  | /' "$new"
-  ask go "Speichern? [J/n]" j
-  [[ "$go" == [jJyY]* ]] || { echo "Nichts geändert."; rm -f "$new"; exit 0; }
+  ask go "Save? [Y/n]"
+  [[ -z "$go" || "$go" == [jJyY]* ]] || { echo "Nothing changed."; rm -f "$new"; exit 0; }
   mkdir -p "$(dirname "$CONFIG_FILE")"
   if [[ $mode == new ]]; then
     if [[ -f "$CONFIG_FILE" ]]; then
       local bak; bak="$CONFIG_FILE.bak-$(date +%Y%m%d-%H%M%S)"
       cp -p "$CONFIG_FILE" "$bak"
-      echo "Alte Konfiguration gesichert: $bak"
+      echo "Old configuration backed up: $bak"
     fi
     { echo "# ccdev host inventory, created by ccdev --init (see ccdev --help)"; cat "$new"; } >"$CONFIG_FILE"
   else
     cat "$new" >>"$CONFIG_FILE"
   fi
   rm -f "$new"
-  echo "✓ Gespeichert. Aktueller Stand:"; echo
+  echo "✓ Saved. Current inventory:"; echo
   REFRESH=1; SRC_NAME=(); SRC_TYPE=(); SRC_OPT=()
   load_config
   list_inventory table || true
   if [[ -f "$HOME/.bashrc" ]] && ! grep -q 'ccdev --completion' "$HOME/.bashrc"; then
-    echo; ask go "Tab-Vervollständigung in ~/.bashrc eintragen? [j/N]"
+    echo; ask go "Add tab completion to ~/.bashrc? [y/N]"
     if [[ "$go" == [jJyY]* ]]; then
-      printf '\n# ccdev: Tab-Vervollständigung\neval "$(ccdev --completion bash 2>/dev/null)"\n' >>"$HOME/.bashrc"
-      echo "✓ Eingetragen, wirkt in neuen Shells."
+      printf '\n# ccdev: tab completion\neval "$(ccdev --completion bash 2>/dev/null)"\n' >>"$HOME/.bashrc"
+      echo "✓ Added, takes effect in new shells."
     fi
   fi
-  echo; echo "Fertig. Aufruf: ccdev (Menü) oder ccdev NAME."
+  echo; echo "Done. Run ccdev (menu) or ccdev NAME."
 }
 
 if [[ $INIT -eq 1 ]]; then
@@ -671,6 +856,14 @@ if [[ $INIT -eq 1 ]]; then
   exit 0
 fi
 load_config
+PERM_MODE="${MODE_CLI:-$PERM_MODE}"   # --mode schlägt [settings] permission_mode
+case "$HELP" in
+  "") ;;
+  short) help_short; exit 0 ;;
+  full) help_full; exit 0 ;;
+  *) help_topic "$HELP"; exit 0 ;;
+esac
+[[ -z "$PERM_MODE" || "$PERM_MODE" =~ ^[A-Za-z]+$ ]] || { echo "Error: invalid permission mode: $PERM_MODE" >&2; exit 1; }
 if [[ -n "$LIST_FMT" ]]; then
   list_inventory "$LIST_FMT"
   exit 0
@@ -679,8 +872,8 @@ if [[ ${#POSITIONAL[@]} -eq 0 ]]; then
   if [[ ${#SRC_NAME[@]} -gt 0 ]]; then
     pick_target "" || { echo "Error: no targets found in the inventory ($CONFIG_FILE)." >&2; exit 1; }
   else
-    echo "Error: no host specified." >&2
-    usage
+    help_short
+    exit 1
   fi
 else
   TARGET="${POSITIONAL[0]}"
@@ -727,7 +920,7 @@ if [[ -z "$SERVER_CMD" && -n "$REMOTE_DIR" ]]; then
     'test -f '"${REMOTE_DIR}"'/.ccdev && . '"${REMOTE_DIR}"'/.ccdev && echo "$SERVER_CMD"' 2>/dev/null || true)
   if [[ -n "$REMOTE_SERVER_CMD" ]]; then
     SERVER_CMD="$REMOTE_SERVER_CMD"
-    echo "  ✓ .ccdev config gefunden: SERVER_CMD gesetzt"
+    echo "  ✓ .ccdev config found: SERVER_CMD set"
   fi
 fi
 
@@ -735,25 +928,26 @@ fi
 if [[ -n "$SERVER_CMD" ]]; then
   ENTR_OK=$(ssh -o ConnectTimeout=5 "${SSH_TARGET}" 'command -v entr &>/dev/null && echo yes || echo no' 2>/dev/null || echo "no")
   if [[ "$ENTR_OK" != "yes" ]]; then
-    echo "  ⚠ entr nicht auf Remote gefunden (nützlich für auto-restart des Dev-Servers)"
-    read -rp "  entr auf ${SSH_TARGET} installieren? [j/N] " REPLY
-    if [[ "$REPLY" =~ ^[jJ]$ ]]; then
+    echo "  ⚠ entr not found on the remote (useful to auto-restart the dev server)"
+    read -rp "  Install entr on ${SSH_TARGET} (sudo apt-get)? [y/N] " REPLY
+    if [[ "$REPLY" =~ ^[yYjJ]$ ]]; then
       ssh -t "${SSH_TARGET}" "sudo apt-get update -qq && sudo apt-get install -y entr"
-      echo "  ✓ entr installiert"
+      echo "  ✓ entr installed"
     fi
   fi
 fi
 
 # This script runs on the remote host.
 # Kopf: Einstellungen sauber quotiert; Rumpf: Programm unverändert (quoted heredoc, keine \$-Maskierung nötig).
-REMOTE_HEAD=$(printf 'BYOBU_SESSION=%q\nREMOTE_DIR=%q\nNEW_SESSION=%q\nSERVER_CMD=%q\nBASE_DIR=%q\nRESTORE=%q\n' \
-  "$BYOBU_SESSION" "$REMOTE_DIR" "$NEW_SESSION" "$SERVER_CMD" "$BASE_DIR" "$RESTORE")
+REMOTE_HEAD=$(printf 'BYOBU_SESSION=%q\nREMOTE_DIR=%q\nNEW_SESSION=%q\nSERVER_CMD=%q\nBASE_DIR=%q\nRESTORE=%q\nPERM_MODE=%q\n' \
+  "$BYOBU_SESSION" "$REMOTE_DIR" "$NEW_SESSION" "$SERVER_CMD" "$BASE_DIR" "$RESTORE" "$PERM_MODE")
 REMOTE_BODY=$(cat <<'REMOTE'
 set -euo pipefail
 
 # Wird von ccdev auf dem Zielrechner ausgeführt. Davor setzt ccdev:
-# BYOBU_SESSION REMOTE_DIR NEW_SESSION SERVER_CMD BASE_DIR RESTORE
+# BYOBU_SESSION REMOTE_DIR NEW_SESSION SERVER_CMD BASE_DIR RESTORE PERM_MODE
 BASE_DIR="${BASE_DIR:-$HOME}"
+CLAUDE="claude${PERM_MODE:+ --permission-mode $PERM_MODE}"
 [[ "$BASE_DIR" != /* ]] && BASE_DIR="$HOME/$BASE_DIR"   # relativ = unter dem $HOME des Zielrechners
 CD_CMD=""
 [[ -n "$REMOTE_DIR" ]] && CD_CMD="cd $(printf '%q' "$REMOTE_DIR") && "
@@ -764,7 +958,7 @@ proj_hist()    { echo "$HOME/.claude/projects/$(proj_key "$1")"; }
 has_history()  { ls "$(proj_hist "$1")"/*.jsonl >/dev/null 2>&1; }
 last_activity() {
   local f; f=$(ls -t "$(proj_hist "$1")"/*.jsonl 2>/dev/null | head -1 || true)
-  if [[ -n "$f" ]]; then date -r "$f" +%d.%m.%Y; else echo "neu"; fi
+  if [[ -n "$f" ]]; then date -r "$f" +%Y-%m-%d; else echo "new"; fi
 }
 sname() { local n; n=$(basename "$1"); echo "${n//[.:]/_}"; }
 
@@ -785,7 +979,7 @@ start_project() {   # $1 = Projektordner; startet die byobu-Session im Hintergru
   byobu new-session -d -s "$n" -c "$d"
   srv=""
   [[ -f "$d/.ccdev" ]] && srv=$(bash -c '. "$1/.ccdev" >/dev/null 2>&1; echo "${SERVER_CMD:-}"' _ "$d")
-  cl="claude"; has_history "$d" && cl="claude --continue"
+  cl="$CLAUDE"; has_history "$d" && cl="$CLAUDE --continue"
   if [[ -n "$srv" ]]; then
     byobu split-window -h -t "$n:0"
     byobu send-keys -t "$n:0.1" "cd $qd && $srv" Enter
@@ -793,25 +987,25 @@ start_project() {   # $1 = Projektordner; startet die byobu-Session im Hintergru
   else
     byobu send-keys -t "$n:0" "cd $qd && $cl" Enter
   fi
-  echo "  ✓ gestartet: $n  ($d, $([[ $cl == *continue ]] && echo "letzte Sitzung fortgesetzt" || echo "neue Sitzung"))"
+  echo "  ✓ started: $n  ($d, $([[ $cl == *continue ]] && echo "last session continued" || echo "new session"))"
 }
 
 restore_all() {
   local d any=0
   while IFS= read -r d; do [[ -n "$d" ]] && { start_project "$d"; any=1; }; done < <(list_projects)
-  [[ $any -eq 1 ]] || echo "  (keine gespeicherten Projekte ohne laufende Session)"
+  [[ $any -eq 1 ]] || echo "  (no saved projects without a running session)"
 }
 
 new_session() {
   if byobu has-session -t "=${BYOBU_SESSION}" 2>/dev/null; then
-    echo "→ byobu-Session '${BYOBU_SESSION}' existiert bereits, verbinde …"
+    echo "→ byobu session '${BYOBU_SESSION}' already exists, attaching …"
     byobu attach-session -t "=${BYOBU_SESSION}"
     return
   fi
-  echo "→ Starte neue byobu-Session '${BYOBU_SESSION}' …"
+  echo "→ Starting new byobu session '${BYOBU_SESSION}' …"
   byobu new-session -s "${BYOBU_SESSION}" -d
-  local cl="claude --resume"
-  [[ "${NEW_SESSION}" -eq 1 ]] && cl="claude"
+  local cl="$CLAUDE --resume"
+  [[ "${NEW_SESSION}" -eq 1 ]] && cl="$CLAUDE"
   if [[ -n "${SERVER_CMD}" ]]; then
     # Split-Pane Layout: Claude links, Server rechts
     byobu split-window -h -t "${BYOBU_SESSION}:0"
@@ -835,36 +1029,36 @@ show_menu() {
   local i=1 s line info
   echo ""
   if [[ ${#SESSION_NAMES[@]} -gt 0 ]]; then
-    echo "Aktive byobu-Sessions:"
+    echo "Running byobu sessions:"
     echo "──────────────────────────────────────"
     while IFS= read -r line; do
       [[ -n "$line" ]] && echo "  [$i] $line" && i=$((i + 1))
     done < <(byobu list-sessions 2>/dev/null || true)
   fi
   if [[ ${#PROJECTS[@]} -gt 0 ]]; then
-    echo "Gespeicherte Projekte (nicht gestartet) in $BASE_DIR:"
+    echo "Saved projects (not started) in $BASE_DIR:"
     echo "──────────────────────────────────────"
     for s in "${PROJECTS[@]}"; do
-      if has_history "$s"; then info="zuletzt $(last_activity "$s")"; else info="noch kein Verlauf"; fi
+      if has_history "$s"; then info="last used $(last_activity "$s")"; else info="no history yet"; fi
       printf "  [%d] %-14s %s, %s\n" "$i" "$(sname "$s")" "$s" "$info"
       i=$((i + 1))
     done
   fi
   echo "──────────────────────────────────────"
-  [[ ${#PROJECTS[@]} -gt 0 ]] && echo "  [r] Alle gespeicherten Projekte starten"
-  echo "  [n] Neue Session erstellen"
-  echo "  [q] Abbrechen"
+  [[ ${#PROJECTS[@]} -gt 0 ]] && echo "  [r] Start all saved projects"
+  echo "  [n] New session"
+  echo "  [q] Quit"
   echo ""
 }
 
 if [[ "${RESTORE}" -eq 1 ]]; then
-  echo "→ Starte alle gespeicherten Projekte in $BASE_DIR …"
+  echo "→ Starting all saved projects in $BASE_DIR …"
   restore_all
 fi
 
 load_lists
 if [[ ${#SESSION_NAMES[@]} -eq 0 && ${#PROJECTS[@]} -eq 0 ]]; then
-  echo "Keine byobu-Sessions gefunden."
+  echo "No byobu sessions found."
   new_session
   exit 0
 fi
@@ -875,11 +1069,11 @@ fi
 
 show_menu
 while true; do
-  read -rp "Wahl: " CHOICE
+  read -rp "Choice: " CHOICE
   NS=${#SESSION_NAMES[@]}; NP=${#PROJECTS[@]}
 
   if [[ "$CHOICE" == "q" ]]; then
-    echo "Abgebrochen."
+    echo "Bye."
     exit 0
   fi
 
@@ -890,7 +1084,7 @@ while true; do
   fi
 
   if [[ "$CHOICE" == "n" ]]; then
-    read -rp "Name der neuen Session [${BYOBU_SESSION}]: " NAME
+    read -rp "Name of the new session [${BYOBU_SESSION}]: " NAME
     NAME="${NAME:-$BYOBU_SESSION}"
     BYOBU_SESSION="${NAME//[.:]/_}"
     new_session
@@ -906,10 +1100,10 @@ while true; do
     fi
     SELECTED="${SESSION_NAMES[$(( CHOICE - 1 ))]}"
     echo ""
-    echo "  [a] Attachen"
-    echo "  [k] Killen"
-    echo "  [b] Zurück"
-    read -rp "Aktion für '$SELECTED': " ACTION
+    echo "  [a] Attach"
+    echo "  [k] Kill"
+    echo "  [b] Back"
+    read -rp "Action for '$SELECTED': " ACTION
     case "$ACTION" in
       a)
         byobu attach-session -t "=$SELECTED"
@@ -917,12 +1111,12 @@ while true; do
         ;;
       k)
         byobu kill-session -t "=$SELECTED"
-        echo "Session '$SELECTED' beendet."
+        echo "Session '$SELECTED' killed."
         load_lists
         if [[ ${#SESSION_NAMES[@]} -eq 0 && ${#PROJECTS[@]} -eq 0 ]]; then
-          echo "Keine Sessions mehr vorhanden."
-          read -rp "Neue Session erstellen? [j/n]: " YN
-          [[ "$YN" == "j" ]] && new_session
+          echo "No sessions left."
+          read -rp "Start a new session? [y/n]: " YN
+          [[ "$YN" == [yYjJ]* ]] && new_session
           exit 0
         fi
         show_menu
@@ -931,11 +1125,11 @@ while true; do
         show_menu
         ;;
       *)
-        echo "Ungültige Aktion."
+        echo "Invalid action."
         ;;
     esac
   else
-    echo "Ungültige Eingabe."
+    echo "Invalid choice."
   fi
 done
 REMOTE
@@ -948,28 +1142,28 @@ QUOTED_CMD="$(printf '%q' "$REMOTE_CMD")"
 
 # --- Preflight: Lokale Dependencies ---
 LOCAL_FAIL=0
-for tool in mosh ssh scp; do
+for tool in ssh scp; do   # mosh ist optional, ohne mosh wird ssh benutzt
   if ! command -v "$tool" &>/dev/null; then
-    echo "✗ Lokal fehlt: $tool" >&2
+    echo "✗ Missing locally: $tool" >&2
     LOCAL_FAIL=1
   fi
 done
 [[ "$LOCAL_FAIL" -eq 1 ]] && exit 1
 
 # --- Preflight: Remote Dependencies ---
-echo "🔍 Prüfe Remote-Dependencies auf ${SSH_TARGET}…"
+echo "🔍 Checking remote dependencies on ${SSH_TARGET}…"
 REMOTE_CHECK=$(ssh -o ConnectTimeout=5 "${SSH_TARGET}" \
   'export PATH="$HOME/.npm-global/bin:$PATH"; MISSING=(); for t in byobu mosh-server claude; do command -v "$t" &>/dev/null || MISSING+=("$t"); done; echo "${MISSING[*]}"' 2>&1)
 SSH_RC=$?
 
 if [[ "$SSH_RC" -ne 0 ]]; then
-  echo "✗ SSH-Verbindung zu ${SSH_TARGET} fehlgeschlagen:" >&2
+  echo "✗ SSH connection to ${SSH_TARGET} failed:" >&2
   echo "  $REMOTE_CHECK" >&2
   exit 1
 fi
 
 if [[ -n "$REMOTE_CHECK" ]]; then
-  echo "✗ Remote fehlen folgende Tools: $REMOTE_CHECK"
+  echo "✗ Missing on the remote: $REMOTE_CHECK"
   echo ""
 
   APT_MISSING=""
@@ -982,19 +1176,19 @@ if [[ -n "$REMOTE_CHECK" ]]; then
     esac
   done
 
-  read -rp "  Jetzt auf ${SSH_TARGET} installieren? [j/N] " REPLY
-  if [[ ! "$REPLY" =~ ^[jJ]$ ]]; then
-    echo "Abgebrochen." >&2
+  read -rp "  Install now on ${SSH_TARGET} (sudo apt-get; Node.js via NodeSource if needed; claude via npm)? [y/N] " REPLY
+  if [[ ! "$REPLY" =~ ^[yYjJ]$ ]]; then
+    echo "Aborted." >&2
     exit 1
   fi
 
   if [[ -n "$APT_MISSING" ]]; then
-    echo "  ⬇ Installiere via apt:${APT_MISSING}…"
+    echo "  ⬇ Installing via apt:${APT_MISSING}…"
     ssh -t "${SSH_TARGET}" "sudo apt-get update -qq && sudo apt-get install -y${APT_MISSING}"
   fi
 
   if [[ "$CLAUDE_MISSING" -eq 1 ]]; then
-    echo "  ⬇ Prüfe Node.js…"
+    echo "  ⬇ Checking Node.js…"
     ssh -t "${SSH_TARGET}" 'bash -lc "
       NODE_OK=0
       if command -v node &>/dev/null; then
@@ -1002,7 +1196,7 @@ if [[ -n "$REMOTE_CHECK" ]]; then
         [ \"\$NODE_VER\" -ge 18 ] && NODE_OK=1
       fi
       if [ \"\$NODE_OK\" -eq 0 ]; then
-        echo \"  ⬇ Installiere Node.js 20...\"
+        echo \"  ⬇ Installing Node.js 20...\"
         curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
         sudo apt-get install -y nodejs
       else
@@ -1010,69 +1204,62 @@ if [[ -n "$REMOTE_CHECK" ]]; then
       fi
       # npm sicherstellen (Ubuntu apt nodejs enthält es nicht immer)
       if ! command -v npm &>/dev/null; then
-        echo \"  ⬇ Installiere npm...\"
+        echo \"  ⬇ Installing npm...\"
         sudo apt-get install -y npm
       fi
-      echo \"  ⬇ Setze npm prefix...\"
+      echo \"  ⬇ Setting npm prefix...\"
       mkdir -p ~/.npm-global
       npm config set prefix ~/.npm-global
-      echo \"  ⬇ Installiere claude...\"
+      echo \"  ⬇ Installing claude...\"
       PATH=\"\$HOME/.npm-global/bin:\$PATH\" npm install -g @anthropic-ai/claude-code
       grep -qxF \"export PATH=\\\"\\\$HOME/.npm-global/bin:\\\$PATH\\\"\" ~/.bashrc \
         || echo \"export PATH=\\\"\\\$HOME/.npm-global/bin:\\\$PATH\\\"\" >> ~/.bashrc
-      echo \"  ✓ claude installiert\"
+      echo \"  ✓ claude installed\"
     "'
   fi
 
   # Nochmal prüfen ob Installation erfolgreich war
   echo ""
-  echo "🔍 Prüfe erneut…"
+  echo "🔍 Checking again…"
   REMOTE_CHECK=$(ssh -o ConnectTimeout=5 "${SSH_TARGET}" \
     'export PATH="$HOME/.npm-global/bin:$PATH"; MISSING=(); for t in byobu mosh-server claude; do command -v "$t" &>/dev/null || MISSING+=("$t"); done; echo "${MISSING[*]}"' 2>&1)
   if [[ -n "$REMOTE_CHECK" ]]; then
-    echo "✗ Installation fehlgeschlagen, fehlen noch: $REMOTE_CHECK" >&2
+    echo "✗ Installation failed, still missing: $REMOTE_CHECK" >&2
     exit 1
   fi
 fi
-echo "  ✓ Remote-Dependencies OK"
+echo "  ✓ Remote dependencies OK"
 echo ""
 
 
 # --- Claude Auth prüfen und ggf. von lokal übertragen ---
 if [[ "$SYNC_AUTH" -eq 1 ]]; then
-echo "🔑 Prüfe Claude-Auth auf ${SSH_TARGET}…"
+echo "🔑 Checking Claude auth on ${SSH_TARGET}…"
 REMOTE_AUTH=$(ssh -o ConnectTimeout=5 "${SSH_TARGET}"   'test -f ~/.claude/.credentials.json && echo "ok" || (grep -q "oauthAccount\|apiKey" ~/.claude/settings.json 2>/dev/null && echo "ok" || echo "missing")' 2>/dev/null || echo "missing")
 
 if [[ "$REMOTE_AUTH" != "ok" ]]; then
-  echo "  ⚠ Keine Claude-Auth auf Remote gefunden"
+  echo "  ⚠ No Claude auth found on the remote"
 
-  # Lokale Auth prüfen
-  LOCAL_AUTH_OK=0
-  if [[ -f "$HOME/.claude/.credentials.json" ]] || \
-     grep -q "oauthAccount\|apiKey" "$HOME/.claude/settings.json" 2>/dev/null; then
-    LOCAL_AUTH_OK=1
-  fi
-
-  if [[ "$LOCAL_AUTH_OK" -eq 0 ]]; then
-    echo "  ✗ Auch lokal keine Claude-Auth gefunden." >&2
-    echo "    Bitte zuerst lokal \'claude\' starten und einloggen, dann erneut verbinden." >&2
+  # Nur die Anmeldung übertragen, nie die settings.json (sie würde die Einstellungen auf dem Host überschreiben)
+  if [[ ! -f "$HOME/.claude/.credentials.json" ]]; then
+    echo "  ✗ No local login to copy (~/.claude/.credentials.json)." >&2
+    echo "    Run 'claude' locally and log in first, or log in on the host (an API key" >&2
+    echo "    can be set there via ANTHROPIC_API_KEY)." >&2
     exit 1
   fi
 
-  read -rp "  Lokale Auth (~/.claude/) auf ${SSH_TARGET} übertragen? [j/N] " REPLY
-  if [[ "$REPLY" =~ ^[jJ]$ ]]; then
-    echo "  ⬆ Übertrage ~/.claude/…"
-    ssh "${SSH_TARGET}" "mkdir -p ~/.claude"
-    # Nur Auth-relevante Dateien — keine projektspezifischen Settings
-    for f in .credentials.json settings.json; do
-      [[ -f "$HOME/.claude/$f" ]] && scp -q "$HOME/.claude/$f" "${SSH_TARGET}:~/.claude/$f"
-    done
-    echo "  ✓ Auth übertragen"
+  read -rp "  Copy your local login (~/.claude/.credentials.json) to ${SSH_TARGET}? [y/N] " REPLY
+  if [[ "$REPLY" =~ ^[yYjJ]$ ]]; then
+    echo "  ⬆ Copying ~/.claude/.credentials.json…"
+    ssh "${SSH_TARGET}" "mkdir -p ~/.claude && chmod 700 ~/.claude"
+    scp -q "$HOME/.claude/.credentials.json" "${SSH_TARGET}:~/.claude/.credentials.json"
+    ssh "${SSH_TARGET}" "chmod 600 ~/.claude/.credentials.json"
+    echo "  ✓ Login copied"
   else
-    echo "  ⚠ Auth nicht übertragen — claude wird nach Login fragen"
+    echo "  ⚠ Auth not copied, claude will ask you to log in"
   fi
 else
-  echo "  ✓ Claude-Auth OK"
+  echo "  ✓ Claude auth OK"
 fi
 fi
 echo ""
@@ -1083,9 +1270,9 @@ LOOP_PID=""
 WATCH_FIFO=""
 if [[ "$NO_SCREENSHOTS" -eq 0 ]]; then
   if ! command -v inotifywait &>/dev/null; then
-    echo "⚠ inotifywait nicht gefunden — Screenshot-Sync deaktiviert (inotify-tools installieren oder --no-screenshots nutzen)"
+    echo "⚠ inotifywait not found, screenshot sync disabled (install inotify-tools or use --no-screenshots)"
   elif [[ ! -d "$LOCAL_SCREENSHOT_DIR" ]]; then
-    echo "⚠ Screenshot-Verzeichnis nicht gefunden: $LOCAL_SCREENSHOT_DIR — Screenshot-Sync deaktiviert"
+    echo "⚠ Screenshot dir not found: $LOCAL_SCREENSHOT_DIR, screenshot sync disabled"
   else
     # Remote-Ziel: screenshots/ im Projektverzeichnis, oder ~/screenshots als Fallback
     if [[ -n "$REMOTE_DIR" ]]; then
@@ -1106,19 +1293,19 @@ if [[ "$NO_SCREENSHOTS" -eq 0 ]]; then
 
     TMPSS=$(mktemp)
     cat > "$TMPSS" <<SSEOF
-Schau dir die neuesten Screenshots im Verzeichnis ${REMOTE_SCREENSHOT_DIR}/ an.
-Sortiere nach Dateiname absteigend (neueste zuerst).
+Look at the newest screenshots in ${REMOTE_SCREENSHOT_DIR}/.
+Sort by file name, descending (newest first).
 
-Falls \$ARGUMENTS eine Zahl ist, lies die entsprechende Anzahl der neuesten Screenshots.
-Falls \$ARGUMENTS Text ist, lies den neuesten Screenshot und beantworte die Frage dazu.
-Falls \$ARGUMENTS leer ist, lies den neuesten Screenshot und beschreibe was du siehst.
+If \$ARGUMENTS is a number, read that many of the newest screenshots.
+If \$ARGUMENTS is text, read the newest screenshot and answer the question about it.
+If \$ARGUMENTS is empty, read the newest screenshot and describe what you see.
 SSEOF
     ssh "${SSH_TARGET}" "mkdir -p ${SS_CMD_DIR}" 2>/dev/null
     scp -q "$TMPSS" "${SSH_TARGET}:${SS_CMD_DIR}/ss.md"
     rm -f "$TMPSS"
-    echo "  ✓ /ss Slash-Command auf Remote erstellt (${SS_CMD_DIR})"
+    echo "  ✓ /ss slash command created on the remote (${SS_CMD_DIR})"
 
-    echo "📸 Screenshot-Watcher aktiv → ${SSH_TARGET}:${REMOTE_SCREENSHOT_DIR}"
+    echo "📸 Screenshot watcher active → ${SSH_TARGET}:${REMOTE_SCREENSHOT_DIR}"
 
     # close_write deckt Tools ab, die direkt schreiben (GNOME);
     # moved_to deckt Tools ab, die in eine Temp-Datei schreiben und atomar
@@ -1150,7 +1337,7 @@ cleanup() {
   [[ -n "$LOOP_PID" ]]    && kill "$LOOP_PID" 2>/dev/null
   wait "$INOTIFY_PID" "$LOOP_PID" 2>/dev/null
   [[ -n "$WATCH_FIFO" ]] && rm -f "$WATCH_FIFO"
-  [[ -n "$INOTIFY_PID$LOOP_PID" ]] && echo "🛑 Screenshot-Watcher gestoppt"
+  [[ -n "$INOTIFY_PID$LOOP_PID" ]] && echo "🛑 Screenshot watcher stopped"
 }
 trap cleanup EXIT
 
