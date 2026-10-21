@@ -61,7 +61,9 @@ Host inventory (optional): ~/.config/ccdev/config, or \$CCDEV_CONFIG
                           marker = WORD     only Host lines carrying "# WORD" (optional)
                           file = PATH...    (default: ~/.ssh/config)
   type = proxmox-ssh      nodes = root@pve1 root@pve2     (first reachable one is used)
-                          tag = claude      LXC containers with this tag (default: claude)
+                          tag = claude      guests with this tag (default: claude)
+                          types = lxc qemu  containers and/or VMs (default: both;
+                                            VM addresses need the QEMU guest agent)
                           user = root       login user for them (default: root)
   type = command          run = CMD         prints lines: NAME<TAB>TARGET[<TAB>STATUS[<TAB>INFO]]
                           timeout = 20      seconds
@@ -275,35 +277,53 @@ src_ssh_config() {
 }
 
 src_proxmox_ssh() {
-  local i="$1" h user rows id node name st ip
+  local i="$1" h user rows id node name st ip kind note
   user=$(opt "$i" user root)
   for h in $(opt "$i" nodes); do
-    rows=$(ssh -o ConnectTimeout=5 -o BatchMode=yes "$h" python3 - "$(opt "$i" tag claude)" <<'PY' 2>/dev/null
+    # ssh fügt die Argumente zu einer Befehlszeile zusammen, daher quotieren
+    rows=$(ssh -o ConnectTimeout=5 -o BatchMode=yes "$h" \
+      "python3 - $(printf '%q ' "$(opt "$i" tag claude)" "$(opt "$i" types "lxc qemu")")" <<'PY' 2>/dev/null
 import json, subprocess, sys
 from concurrent.futures import ThreadPoolExecutor
-tag = sys.argv[1]
+tag, types = sys.argv[1], sys.argv[2].split()
 def get(*a):
-    out = subprocess.run(["pvesh", "get", *a, "--output-format", "json"], capture_output=True, text=True).stdout
-    return json.loads(out or "[]")
-def ip(r):
+    try:
+        out = subprocess.run(["pvesh", "get", *a, "--output-format", "json"],
+                             capture_output=True, text=True, timeout=10).stdout
+        return json.loads(out or "null")
+    except (subprocess.TimeoutExpired, ValueError):
+        return None
+def addr(r):   # (IP oder "-", Hinweis)
     if r["status"] != "running":
-        return "-"
-    for i in get("/nodes/%s/lxc/%s/interfaces" % (r["node"], r["vmid"])):
-        if i.get("name") != "lo" and i.get("inet"):
-            return i["inet"].split("/")[0]
-    return "-"
-cts = sorted((r for r in get("/cluster/resources", "--type", "vm")
-              if r["type"] == "lxc" and tag in (r.get("tags") or "").split(";")), key=lambda r: r["vmid"])
+        return "-", ""
+    if r["type"] == "lxc":
+        for i in get("/nodes/%s/lxc/%s/interfaces" % (r["node"], r["vmid"])) or []:
+            if i.get("name") != "lo" and i.get("inet"):
+                return i["inet"].split("/")[0], ""
+        return "-", "keine IPv4"
+    res = get("/nodes/%s/qemu/%s/agent/network-get-interfaces" % (r["node"], r["vmid"]))
+    if not isinstance(res, dict) or not res.get("result"):
+        return "-", "kein Gastagent"
+    for i in res["result"]:
+        if i.get("name") == "lo":
+            continue
+        for a in i.get("ip-addresses") or []:
+            if a.get("ip-address-type") == "ipv4" and not a.get("ip-address", "").startswith("127."):
+                return a["ip-address"], ""
+    return "-", "keine IPv4"
+vms = sorted((r for r in get("/cluster/resources", "--type", "vm") or []
+              if r.get("type") in types and tag in (r.get("tags") or "").split(";")), key=lambda r: r["vmid"])
 with ThreadPoolExecutor(8) as ex:
-    ips = list(ex.map(ip, cts))
-for r, a in zip(cts, ips):
-    print(r["vmid"], r["node"], r["name"], r["status"], a, sep="\t")
+    addrs = list(ex.map(addr, vms))
+for r, (a, note) in zip(vms, addrs):
+    print(r["vmid"], r["node"], r["name"], r["status"], a, r["type"], note, sep="\t")
 PY
 ) || continue
-    while IFS=$'\t' read -r id node name st ip; do
+    while IFS=$'\t' read -r id node name st ip kind note; do
       [[ -z "$id" ]] && continue
       [[ "$ip" == - ]] || ip="$user@$ip"
-      printf '%s\t%s\t%s\t%s\n' "$name" "$ip" "$st" "CT$id $node"
+      [[ "$kind" == qemu ]] && kind=VM || kind=CT
+      printf '%s\t%s\t%s\t%s\n' "$name" "$ip" "$st" "$kind$id $node${note:+, $note}"
     done <<<"$rows"
     return 0
   done
@@ -471,14 +491,19 @@ pick_target() {
     for i in "${!HIT[@]}"; do
       IFS=$'\t' read -r src name target st info <<<"${HIT[$i]}"
       [[ "$src" != "$last" ]] && { echo "  $src"; last="$src"; }
-      is_up "$st" "$target" || target="(aus)"
+      is_up "$st" x || target="(aus)"
+      [[ "$target" == - ]] && target="(keine IP)"
       printf '    [%d] %-18s %-24s %s\n' $((i + 1)) "$name" "$target" "$info"
     done
     read -rp "Auswahl: " n </dev/tty || true
     [[ "$n" =~ ^[0-9]+$ && "$n" -ge 1 && "$n" -le ${#HIT[@]} ]] || { echo "Abbruch." >&2; exit 1; }
   fi
   IFS=$'\t' read -r src name target st info <<<"${HIT[$((n - 1))]}"
-  is_up "$st" "$target" || { echo "Error: $src/$name is $st (no target).${INV_NOTE:+ --refresh fragt live ab.}" >&2; exit 1; }
+  if ! is_up "$st" "$target"; then
+    if is_up "$st" x; then echo "Error: $src/$name has no address${info:+ ($info)}." >&2
+    else echo "Error: $src/$name is $st.${INV_NOTE:+ --refresh fragt live ab.}" >&2; fi
+    exit 1
+  fi
   echo "→ $name ($src${info:+, $info}): $target"
   TARGET="$target"
 }

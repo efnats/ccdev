@@ -93,12 +93,13 @@ match  = dev-* lab-*       # glob(s) on the Host alias, default *
 # marker = ccdev           # alternatively: only Host lines ending in "# ccdev"
 # file = ~/.ssh/config
 
-# Proxmox: LXC containers with a tag, IPs looked up via pvesh over SSH
+# Proxmox: containers and VMs with a tag, addresses looked up via pvesh over SSH
 [source proxmox]
 type  = proxmox-ssh
 nodes = root@pve1 root@pve2   # first reachable node is used (any node of a cluster works)
 tag   = claude
 user  = root
+# types = lxc qemu         # default both; VMs need the QEMU guest agent for their address
 
 # Anything else: a command printing NAME<TAB>TARGET[<TAB>STATUS[<TAB>INFO]] per line
 [source tailnet]
