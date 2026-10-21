@@ -37,6 +37,9 @@ ccdev [OPTIONS] [name] [dir]      # with a host inventory
 | `--no-screenshots` | Disable automatic screenshot sync |
 | `--new` | Start a new Claude session (skip --resume) |
 | `--sync-auth` | Sync local Claude auth (~/.claude/) to remote host |
+| `--refresh` | Query the host inventory live, ignoring the cache |
+| `--list [table\|tsv\|json]` | Print the host inventory and exit |
+| `--completion bash` | Print a bash completion script |
 | `-h, --help` | Show help |
 
 ### Examples
@@ -105,6 +108,28 @@ timeout = 10
 ```
 
 Comments start with `#` or `;`, also at the end of a line except in `run`. Targets with status `stopped`, `down`, `off` or `offline` are listed but cannot be selected. Without a config file, the environment variables `CCDEV_PVE` (space-separated PVE node SSH targets), `CCDEV_PVE_TAG` and `CCDEV_PVE_USER` still define a single `proxmox-ssh` source.
+
+### Cache, listing and completion
+
+The inventory is cached in `~/.cache/ccdev/inventory.tsv`. While the cache is younger than `cache_ttl` (and not older than the config file), ccdev uses it right away and refreshes it in the background; otherwise it queries the sources live. If a source fails, its last cached entries are shown marked `(aus Cache)`. `--refresh` forces a live query.
+
+```ini
+[settings]
+cache_ttl = 300   # seconds, 0 = always query live
+```
+
+```bash
+ccdev --list            # table
+ccdev --list json       # for scripts (also: tsv)
+```
+
+Tab completion for names (from the cache, no network) and options, plus known SSH hosts when bash-completion is installed:
+
+```bash
+echo 'eval "$(ccdev --completion bash)"' >> ~/.bashrc
+```
+
+zsh users can load it after `autoload -U bashcompinit && bashcompinit`.
 
 ## How it works
 

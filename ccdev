@@ -14,6 +14,11 @@ BASE_DIR="${CCDEV_BASE:-}"   # Projekt-Basisverzeichnis auf dem Remote (--base >
 RESTORE=0
 # Inventar: benannte Ziele aus Quellen der Konfigurationsdatei (siehe usage); ccdev ohne Host zeigt sie zur Auswahl.
 CONFIG_FILE="${CCDEV_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/ccdev/config}"
+CACHE_FILE="${XDG_CACHE_HOME:-$HOME/.cache}/ccdev/inventory.tsv"
+CACHE_TTL=300   # Sekunden, in denen der Cache ohne Live-Abfrage gilt ([settings] cache_ttl; 0 = immer live)
+REFRESH=0       # --refresh
+LIST_FMT=""     # --list table|tsv|json, intern names (für die Vervollständigung)
+INV_NOTE=""     # Herkunft der zuletzt gelesenen Liste, z. B. "Cache, vor 2 min"
 # Screenshot-Verzeichnis: per --screenshot-dir / CCDEV_SCREENSHOT_DIR überschreibbar.
 # Fallback: $HOME/Pictures/Screenshots, bei root ggf. das des aufrufenden Users (SUDO_USER).
 if [[ -n "${CCDEV_SCREENSHOT_DIR:-}" ]]; then
@@ -44,6 +49,9 @@ Options:
       --restore         Start byobu sessions for all projects not running yet
                         (claude --continue), then show the session menu
       --sync-auth       Sync local Claude auth to remote host
+      --refresh         Query the host inventory live, ignoring the cache
+      --list [FMT]      Print the host inventory (table, tsv or json) and exit
+      --completion bash Print a bash completion script (eval it in ~/.bashrc)
   -h, --help            Show this help
 
 Host inventory (optional): ~/.config/ccdev/config, or \$CCDEV_CONFIG
@@ -57,6 +65,9 @@ Host inventory (optional): ~/.config/ccdev/config, or \$CCDEV_CONFIG
                           user = root       login user for them (default: root)
   type = command          run = CMD         prints lines: NAME<TAB>TARGET[<TAB>STATUS[<TAB>INFO]]
                           timeout = 20      seconds
+  [settings]              cache_ttl = 300   seconds the cached inventory is used as is,
+                                            refreshed in the background (0 = always live)
+  Cache: ~/.cache/ccdev/inventory.tsv. A failing source keeps its last cached entries.
   Without a host, ccdev lists all targets to pick from. A host without ".", "@"
   or ":" is first matched against the names (exact, else prefix; SOURCE/NAME
   limits it to one source); no match goes to ssh as is.
@@ -72,6 +83,45 @@ Examples:
   ccdev --restore root@192.168.1.10                 # after a reboot: restart all projects
 EOF
   exit 0
+}
+
+completion_script() {
+  [[ "$1" == bash ]] || { echo "Error: only bash is supported (zsh: autoload bashcompinit; bashcompinit)." >&2; exit 1; }
+  cat <<'COMP'
+# bash completion for ccdev, load with: eval "$(ccdev --completion bash)"
+_ccdev() {
+  local cur="${COMP_WORDS[COMP_CWORD]}" prev="${COMP_WORDS[COMP_CWORD-1]}" w i n=0
+  case "$prev" in
+    -u|--user|-n|--name|-s|--server|-d|--dir|--base) return ;;
+    -S|--screenshot-dir) COMPREPLY=($(compgen -d -- "$cur")); return ;;
+    --list) COMPREPLY=($(compgen -W "table tsv json" -- "$cur")); return ;;
+    --completion) COMPREPLY=($(compgen -W "bash" -- "$cur")); return ;;
+  esac
+  if [[ "$cur" == -* ]]; then
+    COMPREPLY=($(compgen -W "-u --user -d --dir -n --name -s --server -S --screenshot-dir --no-screenshots
+      --new --base --restore --sync-auth --refresh --list --completion -h --help" -- "$cur"))
+    return
+  fi
+  # nur das erste Positionsargument (Host oder Name) vervollständigen
+  for ((i = 1; i < COMP_CWORD; i++)); do
+    w="${COMP_WORDS[i]}"
+    case "$w" in
+      -u|--user|-d|--dir|-n|--name|-s|--server|-S|--screenshot-dir|--base|--completion) ((i++)) ;;
+      -*) ;;
+      *) n=$((n + 1)) ;;
+    esac
+  done
+  [[ $n -eq 0 ]] || return
+  local -a names=($(compgen -W "$(ccdev --names 2>/dev/null)" -- "$cur"))
+  if declare -F _known_hosts_real >/dev/null; then
+    _known_hosts_real -a -- "$cur"
+  else
+    COMPREPLY=()
+  fi
+  COMPREPLY=("${names[@]}" "${COMPREPLY[@]}")
+}
+complete -F _ccdev ccdev
+COMP
 }
 
 # --- Parse arguments ---
@@ -118,6 +168,23 @@ while [[ $# -gt 0 ]]; do
       RESTORE=1
       shift
       ;;
+    --refresh)
+      REFRESH=1
+      shift
+      ;;
+    --list)
+      LIST_FMT=table
+      if [[ "${2:-}" =~ ^(table|tsv|json)$ ]]; then LIST_FMT="$2"; shift; fi
+      shift
+      ;;
+    --names)   # intern: Namen aus dem Cache, für die Vervollständigung
+      LIST_FMT=names
+      shift
+      ;;
+    --completion)
+      completion_script "${2:-bash}"
+      exit 0
+      ;;
     -h|--help)
       usage
       ;;
@@ -144,13 +211,20 @@ load_config() {
       line="${line#"${line%%[![:space:]]*}"}"; line="${line%"${line##*[![:space:]]}"}"
       [[ -z "$line" || "$line" == [\#\;]* ]] && continue
       if [[ "$line" =~ $re_src ]]; then
-        i=$((i + 1)); SRC_NAME[i]="${BASH_REMATCH[1]}"; SRC_TYPE[i]=""
-      elif [[ $i -ge 0 && "$line" =~ $re_kv ]]; then
+        i=${#SRC_NAME[@]}; SRC_NAME[i]="${BASH_REMATCH[1]}"; SRC_TYPE[i]=""
+      elif [[ "$line" == "[settings]" ]]; then
+        i=-2
+      elif [[ $i -ne -1 && "$line" =~ $re_kv ]]; then
         key="${BASH_REMATCH[1]}"; val="${BASH_REMATCH[2]}"
         if [[ "$key" != run ]]; then   # Kommentar am Zeilenende (nicht bei run, Befehle dürfen # enthalten)
           val="${val%%[[:space:]]#*}"; val="${val%"${val##*[![:space:]]}"}"
         fi
-        if [[ "$key" == type ]]; then
+        if [[ $i -eq -2 ]]; then
+          case "$key" in
+            cache_ttl) [[ "$val" =~ ^[0-9]+$ ]] && CACHE_TTL="$val" || echo "Warning: $CONFIG_FILE:$n cache_ttl must be a number" >&2 ;;
+            *) echo "Warning: $CONFIG_FILE:$n unknown setting: $key" >&2 ;;
+          esac
+        elif [[ "$key" == type ]]; then
           SRC_TYPE[i]="$val"
         else
           SRC_OPT["$i:$key"]+="${SRC_OPT["$i:$key"]:+$'\n'}$val"
@@ -244,9 +318,11 @@ src_command() {
   if command -v timeout &>/dev/null; then timeout "$t" bash -c "$cmd"; else bash -c "$cmd"; fi
 }
 
-# Alle Quellen parallel; Ausgabe QUELLE<TAB>NAME<TAB>ZIEL<TAB>STATUS<TAB>INFO in Konfigurationsreihenfolge.
-inventory() {
-  local tmp i fn name target st info
+# Live-Abfrage aller Quellen parallel. $1 bekommt QUELLE<TAB>NAME<TAB>ZIEL<TAB>STATUS<TAB>INFO
+# in Konfigurationsreihenfolge, $2 die Namen ausgefallener Quellen.
+inventory_live() {
+  local out="$1" failed="$2" tmp i fn name target st info
+  : >"$out"; : >"$failed"
   tmp=$(mktemp -d)
   for i in "${!SRC_NAME[@]}"; do
     case "${SRC_TYPE[i]}" in
@@ -257,17 +333,108 @@ inventory() {
       *) echo "Warning: source '${SRC_NAME[i]}': unknown type '${SRC_TYPE[i]}'" >&2; continue ;;
     esac
     ( "$fn" "$i" >"$tmp/$i" 2>"$tmp/$i.err" \
-        || echo "Warning: source '${SRC_NAME[i]}' failed: $(head -1 "$tmp/$i.err")" >&2 ) &
+        || { : >"$tmp/$i.failed"; echo "Warning: source '${SRC_NAME[i]}' failed: $(head -1 "$tmp/$i.err")" >&2; } ) &
   done
   wait
   for i in "${!SRC_NAME[@]}"; do
     [[ -f "$tmp/$i" ]] || continue
+    if [[ -f "$tmp/$i.failed" ]]; then echo "${SRC_NAME[i]}" >>"$failed"; continue; fi
     while IFS=$'\t' read -r name target st info; do
       [[ -n "$name" && -n "$target" ]] || continue
       printf '%s\t%s\t%s\t%s\t%s\n' "${SRC_NAME[i]}" "$name" "$target" "${st:-?}" "$info"
-    done <"$tmp/$i"
+    done <"$tmp/$i" >>"$out"
   done
   rm -rf "$tmp"
+}
+
+cache_age() { echo $(( $(date +%s) - $(date -r "$CACHE_FILE" +%s) )); }
+cache_fresh() {
+  (( CACHE_TTL > 0 )) && [[ -s "$CACHE_FILE" && ! "$CONFIG_FILE" -nt "$CACHE_FILE" ]] && (( $(cache_age) < CACHE_TTL ))
+}
+
+# Live abfragen und den Cache schreiben; ausgefallene Quellen behalten ihre letzten Einträge aus dem Cache
+# (dann bleibt der alte Zeitstempel, damit der nächste Aufruf wieder live fragt). Ausgabe nach $1,
+# Einträge aus dem Cache dort mit "(aus Cache)" markiert.
+inventory_refresh() {
+  local out="$1" tmp s
+  tmp=$(mktemp -d)
+  inventory_live "$tmp/rows" "$tmp/failed"
+  if [[ -s "$tmp/failed" && -f "$CACHE_FILE" ]]; then
+    while IFS= read -r s; do
+      awk -F'\t' -v s="$s" '$1 == s' "$CACHE_FILE" >>"$tmp/rows"
+    done <"$tmp/failed"
+  fi
+  mkdir -p "$(dirname "$CACHE_FILE")"
+  cp "$tmp/rows" "$CACHE_FILE.$$"
+  [[ -s "$tmp/failed" && -f "$CACHE_FILE" ]] && touch -r "$CACHE_FILE" "$CACHE_FILE.$$"
+  mv -f "$CACHE_FILE.$$" "$CACHE_FILE"
+  if [[ -s "$tmp/failed" ]]; then
+    awk -F'\t' -v OFS='\t' 'NR == FNR {f[$0] = 1; next} ($1 in f) {$5 = $5 ($5 == "" ? "" : " ") "(aus Cache)"} 1' \
+      "$tmp/failed" "$tmp/rows" >"$out"
+  else
+    cp "$tmp/rows" "$out"
+  fi
+  rm -rf "$tmp"
+}
+
+# Cache im Hintergrund erneuern (höchstens ein Lauf gleichzeitig).
+refresh_background() {
+  local lock="$CACHE_FILE.lock"
+  mkdir -p "$(dirname "$CACHE_FILE")"
+  if ! mkdir "$lock" 2>/dev/null; then
+    [[ -n "$(find "$lock" -maxdepth 0 -mmin +2 2>/dev/null)" ]] || return 0   # anderer Lauf aktiv
+    rm -rf "$lock"; mkdir "$lock" 2>/dev/null || return 0
+  fi
+  ( trap 'rm -rf "$lock"' EXIT; inventory_refresh /dev/null ) </dev/null >/dev/null 2>&1 &
+  disown 2>/dev/null || true
+}
+
+# Inventar nach $1: aus dem Cache, solange er frisch ist (dann Erneuerung im Hintergrund), sonst live.
+inventory() {
+  local age
+  if [[ $REFRESH -eq 0 ]] && cache_fresh; then
+    cp "$CACHE_FILE" "$1"
+    age=$(cache_age)
+    if (( age < 60 )); then INV_NOTE="Cache, vor ${age} s"; else INV_NOTE="Cache, vor $((age / 60)) min"; fi
+    refresh_background
+  else
+    INV_NOTE=""
+    inventory_refresh "$1"
+  fi
+}
+
+json_str() { local s="$1"; s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; printf '"%s"' "$s"; }
+
+# --list: Inventar ausgeben (table, tsv, json); names: nur Namen aus dem Cache, ohne Netz.
+list_inventory() {
+  local inv src name target st info first=1
+  if [[ "$1" == names ]]; then
+    [[ -s "$CACHE_FILE" ]] && awk -F'\t' '{print $2; print $1 "/" $2}' "$CACHE_FILE" | sort -u
+    if [[ ${#SRC_NAME[@]} -gt 0 ]] && ! cache_fresh; then refresh_background; fi
+    return 0
+  fi
+  [[ ${#SRC_NAME[@]} -gt 0 ]] || { echo "Error: no host inventory configured ($CONFIG_FILE)." >&2; exit 1; }
+  inv=$(mktemp)
+  inventory "$inv"
+  case "$1" in
+    tsv) cat "$inv" ;;
+    json)
+      printf '['
+      while IFS=$'\t' read -r src name target st info; do
+        [[ $first -eq 1 ]] || printf ','
+        first=0
+        printf '\n  {"source": %s, "name": %s, "target": %s, "status": %s, "info": %s}' \
+          "$(json_str "$src")" "$(json_str "$name")" "$(json_str "$target")" "$(json_str "$st")" "$(json_str "$info")"
+      done <"$inv"
+      printf '\n]\n'
+      ;;
+    *)
+      { printf 'SOURCE\tNAME\tTARGET\tSTATUS\tINFO\n'; cat "$inv"; } \
+        | if command -v column &>/dev/null; then column -t -s $'\t'; else cat; fi
+      [[ -z "$INV_NOTE" ]] || echo "($INV_NOTE, --refresh fragt live ab)" >&2
+      ;;
+  esac
+  rm -f "$inv"
 }
 
 is_up() { [[ "$2" != - ]] && case "$1" in stopped|down|off|offline) false ;; *) true ;; esac; }
@@ -276,7 +443,10 @@ is_up() { [[ "$2" != - ]] && case "$1" in stopped|down|off|offline) false ;; *) 
 pick_target() {
   local want="${1:-}" wsrc="" wname l pass src name target st info n="" last=""
   local -a ALL=() HIT=()
-  while IFS= read -r l; do [[ -n "$l" ]] && ALL+=("$l"); done <<<"$(inventory)"
+  local inv; inv=$(mktemp)
+  inventory "$inv"
+  while IFS= read -r l; do [[ -n "$l" ]] && ALL+=("$l"); done <"$inv"
+  rm -f "$inv"
   if [[ -z "$want" ]]; then
     HIT=("${ALL[@]}")
   else
@@ -297,7 +467,7 @@ pick_target() {
   if [[ ${#HIT[@]} -eq 1 && -n "$want" ]]; then
     n=1
   else
-    echo "Ziele:"
+    echo "Ziele${INV_NOTE:+ ($INV_NOTE)}:"
     for i in "${!HIT[@]}"; do
       IFS=$'\t' read -r src name target st info <<<"${HIT[$i]}"
       [[ "$src" != "$last" ]] && { echo "  $src"; last="$src"; }
@@ -308,12 +478,16 @@ pick_target() {
     [[ "$n" =~ ^[0-9]+$ && "$n" -ge 1 && "$n" -le ${#HIT[@]} ]] || { echo "Abbruch." >&2; exit 1; }
   fi
   IFS=$'\t' read -r src name target st info <<<"${HIT[$((n - 1))]}"
-  is_up "$st" "$target" || { echo "Error: $src/$name is $st (no target)." >&2; exit 1; }
+  is_up "$st" "$target" || { echo "Error: $src/$name is $st (no target).${INV_NOTE:+ --refresh fragt live ab.}" >&2; exit 1; }
   echo "→ $name ($src${info:+, $info}): $target"
   TARGET="$target"
 }
 
 load_config
+if [[ -n "$LIST_FMT" ]]; then
+  list_inventory "$LIST_FMT"
+  exit 0
+fi
 if [[ ${#POSITIONAL[@]} -eq 0 ]]; then
   if [[ ${#SRC_NAME[@]} -gt 0 ]]; then
     pick_target "" || { echo "Error: no targets found in the inventory ($CONFIG_FILE)." >&2; exit 1; }
