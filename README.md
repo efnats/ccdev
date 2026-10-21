@@ -44,7 +44,7 @@ Saved projects (not started) in /root/projects:
 
 ```bash
 # 1. Install (see Install for other ways)
-sudo curl -fsSL https://raw.githubusercontent.com/efnats/ccdev/v1.0.2/ccdev -o /usr/local/bin/ccdev
+sudo curl -fsSL https://raw.githubusercontent.com/efnats/ccdev/v1.1.0/ccdev -o /usr/local/bin/ccdev
 sudo chmod +x /usr/local/bin/ccdev
 
 # 2. Connect. ccdev checks the remote and offers to install byobu, mosh and claude if missing.
@@ -61,7 +61,7 @@ Help: `ccdev -h` for the essentials, `ccdev --help` for all options and your cur
 ## Concepts
 
 - **Host**: the machine Claude Code runs on, given as `user@host`, an ssh alias, or a name from the [host inventory](#host-inventory).
-- **Connection**: mosh if it is installed locally, otherwise ssh. mosh is made for unreliable links:
+- **Connection**: mosh if it is installed locally, otherwise ssh (or always ssh with `--ssh`). mosh is made for unreliable links:
   - **Roaming**: the connection survives a changing IP address, e.g. moving from Wi-Fi to a phone hotspot or VPN.
   - **Sleep**: close the laptop, open it hours later, and the terminal is still connected; there is no ssh timeout to run into.
   - **Bad networks**: keystrokes are echoed locally right away, so typing stays responsive on slow or lossy links (trains, hotel Wi-Fi, mobile data).
@@ -75,12 +75,12 @@ Help: `ccdev -h` for the essentials, `ccdev --help` for all options and your cur
 
 ```bash
 # system-wide
-sudo curl -fsSL https://raw.githubusercontent.com/efnats/ccdev/v1.0.2/ccdev -o /usr/local/bin/ccdev
+sudo curl -fsSL https://raw.githubusercontent.com/efnats/ccdev/v1.1.0/ccdev -o /usr/local/bin/ccdev
 sudo chmod +x /usr/local/bin/ccdev
 
 # or just for you (make sure ~/.local/bin is in your PATH)
 mkdir -p ~/.local/bin
-curl -fsSL https://raw.githubusercontent.com/efnats/ccdev/v1.0.2/ccdev -o ~/.local/bin/ccdev
+curl -fsSL https://raw.githubusercontent.com/efnats/ccdev/v1.1.0/ccdev -o ~/.local/bin/ccdev
 chmod +x ~/.local/bin/ccdev
 
 ccdev --version
@@ -102,7 +102,10 @@ echo 'eval "$(ccdev --completion bash)"' >> ~/.bashrc
 ccdev root@192.168.1.10                 # session manager on the host
 ccdev -u deploy 192.168.1.10            # user given separately
 ccdev myalias                           # ssh alias from ~/.ssh/config (User, Port, … apply)
-ccdev --new root@192.168.1.10 /opt/app  # fresh Claude conversation instead of resuming
+ccdev --fresh root@192.168.1.10 /opt/app  # new Claude conversation instead of continuing
+ccdev --pick root@192.168.1.10 /opt/app   # choose one of the earlier conversations
+ccdev --ssh root@192.168.1.10            # ssh even though mosh is installed (UDP blocked)
+ccdev --dry-run myhost /opt/app          # show what would happen, connect to nothing
 ```
 
 Without a user, ssh decides (your `~/.ssh/config`, else your local user name). mosh is used when it is installed locally, otherwise ccdev falls back to ssh.
@@ -119,7 +122,7 @@ ccdev --base /srv/work root@192.168.1.10   # look for projects in another direct
 
 The base dir defaults to the remote `$HOME`. `CCDEV_BASE` sets it for all hosts; a relative value is taken from the remote `$HOME`, so `export CCDEV_BASE=projects` means `/root/projects` for root and `/home/alice/projects` for alice.
 
-When you give a directory (`ccdev host /opt/app`) and no session is running on the host yet, ccdev starts a session for it right away (`claude --resume`, or `claude` with `--new`). If sessions are running, it shows the menu; `[n]` creates the session, named after the directory by default.
+When you give a directory (`ccdev host /opt/app`) and no session is running on the host yet, ccdev starts a session for it right away. Claude continues the last conversation in that directory (`claude --continue`, plain `claude` without history); `--fresh` starts a new one, `--pick` lets you choose. The same applies to projects started from the menu and to `--restore`. If sessions are running, it shows the menu; `[n]` creates the session, named after the directory by default.
 
 ### Host inventory
 
@@ -146,7 +149,7 @@ A host containing `.`, `@` or `:` always goes to ssh unchanged, and so does a na
 
 ### Screenshots for Claude
 
-If `inotifywait` is installed locally, ccdev watches `~/Pictures/Screenshots` (or `-S DIR`, `$CCDEV_SCREENSHOT_DIR`) while you are connected and copies every new screenshot to the host: into `screenshots/` in the project directory, or `~/screenshots/` without one. It also installs a `/ss` command for Claude there:
+If `inotifywait` is installed locally, ccdev watches `~/Pictures/Screenshots` (or `--screenshot-dir DIR`, `$CCDEV_SCREENSHOT_DIR`, `[settings] screenshot_dir`) while you are connected and copies every new screenshot to the host: into `screenshots/` in the project directory, or `~/screenshots/` without one. It also installs a `/ss` command for Claude there:
 
 ```
 /ss              read and describe the latest screenshot
@@ -165,7 +168,7 @@ Put a `.ccdev` file into the project directory on the host:
 SERVER_CMD="npm run dev"
 ```
 
-New sessions for that project are split: Claude on the left, the dev server on the right. `--server CMD` does the same from the command line. If `entr` is missing on the host, ccdev offers to install it (handy for restarting servers on file changes).
+New sessions for that project are split: Claude on the left, the dev server on the right. `--dev CMD` does the same from the command line. If `entr` is missing on the host, ccdev offers to install it (handy for restarting servers on file changes).
 
 ### Permission mode
 
@@ -185,23 +188,27 @@ Without either, Claude uses the default from `~/.claude/settings.json` on the ho
 | Option | Description |
 |---|---|
 | `-u, --user USER` | SSH user (overrides `user@` in the host) |
-| `-d, --dir DIR` | Project directory on the host (same as the second argument) |
+| `--ssh` | Use ssh even if mosh is installed (e.g. when UDP is blocked) |
+| `--copy-login` | Copy your local Claude login to a host that has none, see [Security notes](#security-notes) |
 | `-n, --name NAME` | byobu session name (default: directory name, else `claude`) |
-| `-s, --server CMD` | Dev server command for a split pane (overrides `.ccdev`) |
-| `-S, --screenshot-dir DIR` | Local screenshot directory to watch |
-| `--no-screenshots` | Don't sync screenshots |
-| `--new` | Start a new Claude conversation instead of `--resume` |
 | `--base DIR` | Where to look for projects on the host (relative to the remote `$HOME` unless absolute) |
 | `--restore` | Start sessions for all saved projects, then show the menu |
+| `--fresh` | Start a new Claude conversation instead of continuing the last one |
+| `--pick` | Choose a conversation from Claude's list (`claude --resume`) |
 | `--mode MODE` | Claude permission mode (`auto`, `plan`, …) |
-| `--sync-auth` | Copy your local Claude login to a host that has none, see [Security notes](#security-notes) |
 | `--init` | Set up the host inventory interactively |
 | `--list [table\|tsv\|json]` | Print the host inventory and exit |
 | `--refresh` | Query the inventory live instead of using the cache |
+| `--dev CMD` | Dev server command for a split pane (overrides `.ccdev`) |
+| `--screenshot-dir DIR` | Local screenshot directory to watch |
+| `--no-screenshots` | Don't sync screenshots |
+| `--dry-run` | Resolve target, transport and Claude command, print them, connect to nothing |
 | `--completion bash` | Print the bash completion script |
 | `--version` | Print the version |
 | `-h` | Short help |
 | `--help [TOPIC]` | All options and your current setup, or a topic: `inventory`, `projects`, `env` |
+
+Renamed in 1.1.0, the old names still work: `--new` → `--fresh`, `-s`/`--server` → `--dev`, `--sync-auth` → `--copy-login`. `-d`/`--dir` (same as the second argument) and `-S` are still accepted but no longer documented.
 
 ### Environment
 
@@ -226,13 +233,13 @@ ccdev keeps these files. Everything else only happens after a prompt you answer 
 | host | `<project>/screenshots/` or `~/screenshots/` | Copied screenshots |
 | host | `cc-watcher.log` next to `screenshots/` | Log of copied screenshots |
 | host | byobu sessions | One per project or name |
-| host | `~/.claude/.credentials.json` | Only with `--sync-auth` |
+| host | `~/.claude/.credentials.json` | Only with `--copy-login` |
 | host | `~/.npm-global/`, PATH line in `~/.bashrc` | Only when ccdev installs claude for you |
 
 ## Security notes
 
 - **Installing on the host.** When byobu, mosh or claude are missing, ccdev asks once and then runs `sudo apt-get install`, for Node.js the NodeSource setup script (`curl … | sudo bash`), and `npm install -g @anthropic-ai/claude-code` into `~/.npm-global` (adding it to `PATH` in `~/.bashrc`). Answer no and install yourself if you prefer.
-- **`--sync-auth`** copies your local login, `~/.claude/.credentials.json`, to a host that has none (mode 600). Your Claude account is then usable on that machine; anyone with root there can read it. Settings are never copied.
+- **`--copy-login`** copies your local login, `~/.claude/.credentials.json`, to a host that has none (mode 600). Your Claude account is then usable on that machine; anyone with root there can read it. Settings are never copied.
 - **Inventory sources run commands.** A `command` source executes its `run` line locally; only use config files you wrote. `proxmox-ssh` needs SSH to a Proxmox node that can run `pvesh`, usually as root. ccdev leaves authentication to you; consider a dedicated key restricted to that purpose.
 - **Permission mode.** `--mode auto` (or `bypassPermissions`) lets Claude act without asking. Use it on hosts where that is acceptable.
 
@@ -244,7 +251,7 @@ ccdev keeps these files. Everything else only happens after a prompt you answer 
 | Inventory shows old state | It comes from the cache (the menu says so); `ccdev --refresh` queries live. |
 | A VM shows `(no IP)`, "no guest agent" | Install and enable the QEMU guest agent in the VM and in its Proxmox options. |
 | "no node reachable" for Proxmox | ssh to the node must work without a password prompt (`ssh -o BatchMode=yes root@pve1 true`). |
-| mosh hangs at "Connecting" | Allow UDP 60000-61000 to the host, and make sure a UTF-8 locale exists on both sides. Without mosh installed locally, ccdev uses ssh. |
+| mosh hangs at "Connecting" | Allow UDP 60000-61000 to the host, and make sure a UTF-8 locale exists on both sides. Or skip mosh: `ccdev --ssh …`, or `transport = ssh` under `[settings]` in the config. |
 | `declare: -A: invalid option` (macOS) | ccdev needs bash 4.4 or newer: `brew install bash`. |
 | No screenshot sync | `inotifywait` is missing locally (`apt install inotify-tools`) or the screenshot directory does not exist. |
 

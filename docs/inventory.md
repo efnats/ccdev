@@ -32,6 +32,9 @@ One `[source NAME]` block per source; `NAME` is shown in the menu and used for `
 [settings]
 cache_ttl       = 300    # seconds the cache is used as is (0 = always query live)
 permission_mode = auto   # default for --mode
+transport       = auto   # auto (mosh if installed), mosh or ssh; --ssh overrides
+screenshot_dir  = ~/Pictures/Screenshots   # default for --screenshot-dir
+screenshots     = on     # off is like --no-screenshots
 
 # Fixed hosts: host = NAME TARGET [INFO]
 [source servers]

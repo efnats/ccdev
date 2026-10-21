@@ -2,6 +2,21 @@
 
 All notable changes to ccdev. Versions follow [Semantic Versioning](https://semver.org/); each release is a git tag (`vX.Y.Z`).
 
+## [1.1.0] - 2026-10-22
+
+### Added
+- `--ssh` and `[settings] transport = auto|mosh|ssh`: use ssh even when mosh is installed, e.g. when UDP is blocked.
+- `--pick`: choose a conversation from Claude's list (`claude --resume`).
+- `--dry-run`: resolve target, user, transport, project and Claude command, print them, contact nothing.
+- `[settings] screenshot_dir` and `screenshots = on|off`.
+
+### Changed
+- Claude continues the last conversation everywhere (`claude --continue`, plain `claude` without history). Starting a single directory used `claude --resume`, which opened Claude's picker.
+- `--fresh` (formerly `--new`) now also applies to projects started from the menu and to `--restore`; before it only affected a single directory.
+- Renamed, the old names still work: `--new` → `--fresh`, `-s`/`--server` → `--dev`, `--sync-auth` → `--copy-login`.
+- `-d`/`--dir` and `-S` are still accepted but no longer documented (use the second argument and `--screenshot-dir`).
+- Precedence for the screenshot dir: `--screenshot-dir`, then `$CCDEV_SCREENSHOT_DIR`, then `[settings] screenshot_dir`.
+
 ## [1.0.2] - 2026-10-22
 
 ### Changed

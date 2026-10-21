@@ -3,13 +3,20 @@
 
 set -euo pipefail
 
-VERSION="1.0.2"
+VERSION="1.1.0"
 BYOBU_SESSION=""
 USER_OVERRIDE=""
 REMOTE_DIR=""
 NO_SCREENSHOTS=0
-NEW_SESSION=0
-SYNC_AUTH=0
+START="continue"  # Claude-Start: continue (Standard), fresh (--fresh), pick (--pick)
+START_CLI=""
+SYNC_AUTH=0     # --copy-login
+TRANSPORT=auto  # auto (mosh wenn vorhanden), mosh, ssh; --ssh / [settings] transport
+TRANSPORT_CLI=""
+DRY_RUN=0       # --dry-run
+SS_DIR_CLI=0    # --screenshot-dir gesetzt
+CFG_SS_DIR=""   # [settings] screenshot_dir
+CFG_SCREENSHOTS=""   # [settings] screenshots = off
 SERVER_CMD=""
 BASE_DIR="${CCDEV_BASE:-}"   # Projekt-Basisverzeichnis auf dem Remote (--base > $CCDEV_BASE > dessen $HOME)
 RESTORE=0
@@ -46,14 +53,15 @@ Usage: ccdev [OPTIONS] [HOST|NAME] [DIR]
 
   ccdev                         pick a host from your inventory
   ccdev root@10.0.0.5           session manager on that host
-  ccdev myhost /opt/app         open a project (own session, Claude resumes)
+  ccdev myhost /opt/app         open a project (own session, Claude continues)
   ccdev --restore myhost        after a reboot: start all saved projects
 
 Common options:
-  -u USER       ssh user               --new        fresh Claude conversation
-  -n NAME       session name           --mode MODE  Claude permission mode (auto, plan, ...)
-  --base DIR    where projects live    --init       set up the host inventory
-  --list        show the inventory     --refresh    ignore the inventory cache
+  -u USER       ssh user               --fresh      new Claude conversation
+  -n NAME       session name           --pick       choose a conversation
+  --base DIR    where projects live    --mode MODE  Claude permission mode (auto, plan, ...)
+  --ssh         ssh instead of mosh    --dry-run    show what would happen
+  --init        set up the inventory   --list       show the inventory
 
 More: ccdev --help (all options), ccdev --help inventory|projects|env
 Docs: $DOCS_URL
@@ -73,25 +81,26 @@ Usage: ccdev [OPTIONS] [HOST|NAME] [DIR]
 Examples:
   ccdev                               pick a host from your inventory
   ccdev root@10.0.0.5                 session manager: running sessions, saved projects
-  ccdev myhost /opt/app               open a project, Claude resumes where it left off
+  ccdev myhost /opt/app               open a project, Claude continues where it left off
   ccdev --restore myhost              after a reboot: start all saved projects
   ccdev --mode auto myhost /opt/app   Claude works without asking, risky actions blocked
-  ccdev --list json                   the inventory for scripts
+  ccdev --dry-run myhost /opt/app     show target, transport and Claude command only
 
 Connection:
   -u, --user USER          ssh user (overrides user@ in HOST; default: ssh decides)
-      --sync-auth          copy your local Claude login (~/.claude/.credentials.json)
+      --ssh                use ssh even if mosh is installed (e.g. UDP blocked)
+      --copy-login         copy your local Claude login (~/.claude/.credentials.json)
                            to the host if it has none
 
 Projects and sessions:
-  -d, --dir DIR            project directory (same as the DIR argument)
   -n, --name NAME          byobu session name (default: name of DIR, else "claude")
       --base DIR           where to look for projects (default: \$CCDEV_BASE, else
                            the remote \$HOME; relative paths start at the remote \$HOME)
       --restore            start sessions for all saved projects, then the menu
 
-Claude:
-      --new                start a new conversation instead of resuming
+Claude (for sessions ccdev starts; default: continue the last conversation):
+      --fresh              start a new conversation
+      --pick               choose a conversation from Claude's list
       --mode MODE          permission mode, e.g. manual, acceptEdits, auto, plan
                            (default: [settings] permission_mode, else the host's
                            Claude settings)
@@ -102,12 +111,13 @@ Host inventory:
       --refresh            query the sources live instead of using the cache
 
 Screenshots and dev server:
-  -S, --screenshot-dir DIR local screenshot dir to watch
-                           (default: \$CCDEV_SCREENSHOT_DIR, else ~/Pictures/Screenshots)
+      --dev CMD            run CMD in a split pane next to Claude (overrides .ccdev)
+      --screenshot-dir DIR local screenshot dir to watch (default: \$CCDEV_SCREENSHOT_DIR,
+                           else [settings] screenshot_dir, else ~/Pictures/Screenshots)
       --no-screenshots     don't copy screenshots to the host
-  -s, --server CMD         run CMD in a split pane next to Claude (overrides .ccdev)
 
 Other:
+      --dry-run            resolve everything, print it, connect to nothing
   -h                       short help
       --help [TOPIC]       this help, or a topic: ${HELP_TOPICS// /, }
       --completion bash    print the bash completion script
@@ -146,6 +156,7 @@ help_setup() {
     printf '  %-12s %s\n' "CCDEV_BASE" "not set (projects in the remote \$HOME)"
   fi
   printf '  %-12s %s\n' "mode" "${PERM_MODE:-not set (Claude settings on the host decide)}"
+  printf '  %-12s %s\n' "transport" "$TRANSPORT$([[ $TRANSPORT == auto ]] && { command -v mosh &>/dev/null && echo " (mosh found)" || echo " (no mosh, ssh)"; })"
 }
 
 help_topic() {
@@ -181,6 +192,9 @@ Config file: ~/.config/ccdev/config (or $CCDEV_CONFIG), one block per source:
   [settings]             cache_ttl = 300          seconds the cache is used as is
                                                   (0 = always query live)
                          permission_mode = auto   default for --mode
+                         transport = auto         auto (mosh if installed), mosh or ssh
+                         screenshot_dir = DIR     default for --screenshot-dir
+                         screenshots = off        like --no-screenshots
 
 Comments start with # or ;, also at the end of a line except in run.
 Cache: ~/.cache/ccdev/inventory.tsv, refreshed in the background; a failing
@@ -197,8 +211,8 @@ CLAUDE.md or a .ccdev file. Every project gets its own byobu session, named
 after the directory.
 
   ccdev HOST               menu: running sessions, then saved projects (not running)
-  ccdev HOST DIR           no session running yet: start DIR's session right away
-                           (claude --resume); otherwise the menu, where [n] creates it
+  ccdev HOST DIR           no session running yet: start DIR's session right away;
+                           otherwise the menu, where [n] creates it
   ccdev --restore HOST     start all saved projects (after a reboot), then the menu
   ccdev --base DIR HOST    look for projects in DIR
 
@@ -206,13 +220,15 @@ Menu keys: a number attaches to a session or starts a project, [r] starts all
 saved projects, [n] creates a new session, [q] quits; for a session [a]ttach,
 [k]ill or [b]ack.
 
-Saved projects start with "claude --continue" (plain "claude" without history).
+Claude starts with "claude --continue" (the last conversation in that directory,
+plain "claude" without history); --fresh starts a new one, --pick shows Claude's
+list of conversations to choose from.
 The base dir defaults to the remote $HOME; CCDEV_BASE or --base change it, and
 a relative value starts at the remote $HOME (CCDEV_BASE=claude is /root/claude
 for root, /home/alice/claude for alice).
 
 Dev server: a .ccdev file in the project with SERVER_CMD="npm run dev" splits
-new sessions, Claude on the left, the server on the right (or --server CMD).
+new sessions, Claude on the left, the server on the right (or --dev CMD).
 TOPIC
       ;;
     env) cat <<'TOPIC'
@@ -233,7 +249,7 @@ Local files:
 On the host:
   <project>/.claude/commands/ss.md, or ~/.claude/commands/ss.md    the /ss command
   <project>/screenshots/, or ~/screenshots/, and cc-watcher.log     copied screenshots
-  ~/.claude/.credentials.json                                       only with --sync-auth
+  ~/.claude/.credentials.json                                       only with --copy-login
   byobu sessions, one per project or name
 
 Tools are only installed on the host after you confirm a prompt (sudo apt-get,
@@ -258,7 +274,7 @@ completion_script() {
 _ccdev() {
   local cur="${COMP_WORDS[COMP_CWORD]}" prev="${COMP_WORDS[COMP_CWORD-1]}" w i n=0
   case "$prev" in
-    -u|--user|-n|--name|-s|--server|-d|--dir|--base) return ;;
+    -u|--user|-n|--name|-s|--server|--dev|-d|--dir|--base) return ;;
     -S|--screenshot-dir) COMPREPLY=($(compgen -d -- "$cur")); return ;;
     --list) COMPREPLY=($(compgen -W "table tsv json" -- "$cur")); return ;;
     --completion) COMPREPLY=($(compgen -W "bash" -- "$cur")); return ;;
@@ -266,15 +282,16 @@ _ccdev() {
     --mode) COMPREPLY=($(compgen -W "manual acceptEdits auto plan dontAsk bypassPermissions" -- "$cur")); return ;;
   esac
   if [[ "$cur" == -* ]]; then
-    COMPREPLY=($(compgen -W "-u --user -d --dir -n --name -s --server -S --screenshot-dir --no-screenshots
-      --new --base --restore --sync-auth --mode --init --refresh --list --completion -h --help --version" -- "$cur"))
+    COMPREPLY=($(compgen -W "-u --user -n --name --dev --screenshot-dir --no-screenshots --fresh --pick
+      --base --restore --copy-login --mode --ssh --dry-run --init --refresh --list --completion -h --help
+      --version" -- "$cur"))
     return
   fi
   # nur das erste Positionsargument (Host oder Name) vervollständigen
   for ((i = 1; i < COMP_CWORD; i++)); do
     w="${COMP_WORDS[i]}"
     case "$w" in
-      -u|--user|-d|--dir|-n|--name|-s|--server|-S|--screenshot-dir|--base|--completion|--mode) ((i++)) ;;
+      -u|--user|-d|--dir|-n|--name|-s|--server|--dev|-S|--screenshot-dir|--base|--completion|--mode) ((i++)) ;;
       -*) ;;
       *) n=$((n + 1)) ;;
     esac
@@ -301,7 +318,7 @@ while [[ $# -gt 0 ]]; do
       USER_OVERRIDE="$2"
       shift 2
       ;;
-    -d|--dir)
+    -d|--dir)   # veraltet: wie das zweite Argument
       need_arg "$@"
       REMOTE_DIR="$2"
       shift 2
@@ -311,26 +328,41 @@ while [[ $# -gt 0 ]]; do
       BYOBU_SESSION="$2"
       shift 2
       ;;
-    -s|--server)
+    --dev|-s|--server)   # -s/--server veraltet
       need_arg "$@"
       SERVER_CMD="$2"
       shift 2
       ;;
-    -S|--screenshot-dir)
+    --screenshot-dir|-S)   # -S veraltet
       need_arg "$@"
       LOCAL_SCREENSHOT_DIR="$2"
+      SS_DIR_CLI=1
       shift 2
       ;;
     --no-screenshots)
       NO_SCREENSHOTS=1
       shift
       ;;
-    --sync-auth)
+    --copy-login|--sync-auth)   # --sync-auth veraltet
       SYNC_AUTH=1
       shift
       ;;
-    --new)
-      NEW_SESSION=1
+    --fresh|--new)   # --new veraltet
+      [[ "$START_CLI" == pick ]] && die_usage "--fresh and --pick exclude each other"
+      START_CLI=fresh
+      shift
+      ;;
+    --pick)
+      [[ "$START_CLI" == fresh ]] && die_usage "--fresh and --pick exclude each other"
+      START_CLI=pick
+      shift
+      ;;
+    --ssh)
+      TRANSPORT_CLI=ssh
+      shift
+      ;;
+    --dry-run)
+      DRY_RUN=1
       shift
       ;;
     --base)
@@ -415,6 +447,9 @@ load_config() {
           case "$key" in
             cache_ttl) [[ "$val" =~ ^[0-9]+$ ]] && CACHE_TTL="$val" || echo "Warning: $CONFIG_FILE:$n cache_ttl must be a number" >&2 ;;
             permission_mode) PERM_MODE="$val" ;;
+            transport) [[ "$val" =~ ^(auto|mosh|ssh)$ ]] && TRANSPORT="$val" || echo "Warning: $CONFIG_FILE:$n transport must be auto, mosh or ssh" >&2 ;;
+            screenshot_dir) CFG_SS_DIR="$val" ;;
+            screenshots) [[ "$val" =~ ^(on|off)$ ]] && CFG_SCREENSHOTS="$val" || echo "Warning: $CONFIG_FILE:$n screenshots must be on or off" >&2 ;;
             *) echo "Warning: $CONFIG_FILE:$n unknown setting: $key" >&2 ;;
           esac
         elif [[ "$key" == type ]]; then
@@ -857,6 +892,12 @@ if [[ $INIT -eq 1 ]]; then
 fi
 load_config
 PERM_MODE="${MODE_CLI:-$PERM_MODE}"   # --mode schlägt [settings] permission_mode
+START="${START_CLI:-$START}"
+[[ -n "$TRANSPORT_CLI" ]] && TRANSPORT="$TRANSPORT_CLI"
+if [[ $SS_DIR_CLI -eq 0 && -z "${CCDEV_SCREENSHOT_DIR:-}" && -n "$CFG_SS_DIR" ]]; then
+  LOCAL_SCREENSHOT_DIR="${CFG_SS_DIR/#\~/$HOME}"
+fi
+[[ "$CFG_SCREENSHOTS" == off ]] && NO_SCREENSHOTS=1
 case "$HELP" in
   "") ;;
   short) help_short; exit 0 ;;
@@ -914,6 +955,46 @@ fi
 
 SSH_TARGET="${SSH_USER:+${SSH_USER}@}${HOST}"
 
+# --- Transport: mosh oder ssh ---
+USE_MOSH=0
+case "$TRANSPORT" in
+  ssh)  TRANSPORT_WHY="ssh (--ssh or transport = ssh)" ;;
+  mosh) command -v mosh &>/dev/null || { echo "✗ transport = mosh, but mosh is not installed locally" >&2; exit 1; }
+        USE_MOSH=1; TRANSPORT_WHY="mosh (transport = mosh)" ;;
+  *)    if command -v mosh &>/dev/null; then USE_MOSH=1; TRANSPORT_WHY="mosh"; else TRANSPORT_WHY="ssh (mosh not installed locally)"; fi ;;
+esac
+
+# --- --dry-run: alles auflösen und anzeigen, nichts kontaktieren ---
+if [[ $DRY_RUN -eq 1 ]]; then
+  cl="claude${PERM_MODE:+ --permission-mode $PERM_MODE}"
+  tilde='~'   # nur zur Anzeige
+  case "$START" in
+    fresh) cl="$cl" ;;
+    pick)  cl="$cl --resume" ;;
+    *)     cl="$cl --continue (plain \"${cl}\" if there is no history yet)" ;;
+  esac
+  echo "Dry run, nothing is contacted:"
+  printf '  %-13s %s\n' "target" "$SSH_TARGET"
+  printf '  %-13s %s\n' "user" "${SSH_USER:-decided by ssh (~/.ssh/config, else $USER)}"
+  printf '  %-13s %s\n' "transport" "$TRANSPORT_WHY"
+  if [[ -n "$REMOTE_DIR" ]]; then
+    printf '  %-13s %s\n' "project" "$REMOTE_DIR (byobu session \"$BYOBU_SESSION\")"
+  else
+    printf '  %-13s %s\n' "project" "none: session manager, projects in ${BASE_DIR:-the remote \$HOME}"
+  fi
+  printf '  %-13s %s\n' "claude" "$cl"
+  [[ $RESTORE -eq 1 ]] && printf '  %-13s %s\n' "restore" "start all saved projects first"
+  printf '  %-13s %s\n' "dev command" "${SERVER_CMD:-from .ccdev on the host, if there is one}"
+  if [[ $NO_SCREENSHOTS -eq 1 ]]; then
+    printf '  %-13s %s\n' "screenshots" "off"
+  else
+    printf '  %-13s %s\n' "screenshots" "$LOCAL_SCREENSHOT_DIR → ${REMOTE_DIR:-$tilde}/screenshots/ on the host"
+  fi
+  # shellcheck disable=SC2088  # Anzeigetext, die Tilde soll nicht expandiert werden
+  [[ $SYNC_AUTH -eq 1 ]] && printf '  %-13s %s\n' "login copy" "~/.claude/.credentials.json, if the host has no login"
+  exit 0
+fi
+
 # --- Read .ccdev config from remote project dir ---
 if [[ -z "$SERVER_CMD" && -n "$REMOTE_DIR" ]]; then
   REMOTE_SERVER_CMD=$(ssh -o ConnectTimeout=5 "${SSH_TARGET}" \
@@ -939,13 +1020,13 @@ fi
 
 # This script runs on the remote host.
 # Kopf: Einstellungen sauber quotiert; Rumpf: Programm unverändert (quoted heredoc, keine \$-Maskierung nötig).
-REMOTE_HEAD=$(printf 'BYOBU_SESSION=%q\nREMOTE_DIR=%q\nNEW_SESSION=%q\nSERVER_CMD=%q\nBASE_DIR=%q\nRESTORE=%q\nPERM_MODE=%q\n' \
-  "$BYOBU_SESSION" "$REMOTE_DIR" "$NEW_SESSION" "$SERVER_CMD" "$BASE_DIR" "$RESTORE" "$PERM_MODE")
+REMOTE_HEAD=$(printf 'BYOBU_SESSION=%q\nREMOTE_DIR=%q\nSTART=%q\nSERVER_CMD=%q\nBASE_DIR=%q\nRESTORE=%q\nPERM_MODE=%q\n' \
+  "$BYOBU_SESSION" "$REMOTE_DIR" "$START" "$SERVER_CMD" "$BASE_DIR" "$RESTORE" "$PERM_MODE")
 REMOTE_BODY=$(cat <<'REMOTE'
 set -euo pipefail
 
 # Wird von ccdev auf dem Zielrechner ausgeführt. Davor setzt ccdev:
-# BYOBU_SESSION REMOTE_DIR NEW_SESSION SERVER_CMD BASE_DIR RESTORE PERM_MODE
+# BYOBU_SESSION REMOTE_DIR START SERVER_CMD BASE_DIR RESTORE PERM_MODE
 BASE_DIR="${BASE_DIR:-$HOME}"
 CLAUDE="claude${PERM_MODE:+ --permission-mode $PERM_MODE}"
 [[ "$BASE_DIR" != /* ]] && BASE_DIR="$HOME/$BASE_DIR"   # relativ = unter dem $HOME des Zielrechners
@@ -961,6 +1042,23 @@ last_activity() {
   if [[ -n "$f" ]]; then date -r "$f" +%Y-%m-%d; else echo "new"; fi
 }
 sname() { local n; n=$(basename "$1"); echo "${n//[.:]/_}"; }
+abs_dir() { local d="${1:-$HOME}"; [[ "$d" == /* ]] || d="$HOME/$d"; echo "$d"; }
+
+# Claude-Aufruf für einen Ordner: letzte Unterhaltung fortsetzen (Standard), neu (fresh) oder auswählen (pick)
+claude_cmd() {
+  case "$START" in
+    fresh) echo "$CLAUDE" ;;
+    pick)  echo "$CLAUDE --resume" ;;
+    *)     if has_history "$1"; then echo "$CLAUDE --continue"; else echo "$CLAUDE"; fi ;;
+  esac
+}
+start_desc() {
+  case "$1" in
+    *--continue) echo "last conversation continued" ;;
+    *--resume)   echo "pick a conversation" ;;
+    *)           echo "new conversation" ;;
+  esac
+}
 
 list_projects() {   # nur Projekte ohne laufende byobu-Session
   local d
@@ -979,7 +1077,7 @@ start_project() {   # $1 = Projektordner; startet die byobu-Session im Hintergru
   byobu new-session -d -s "$n" -c "$d"
   srv=""
   [[ -f "$d/.ccdev" ]] && srv=$(bash -c '. "$1/.ccdev" >/dev/null 2>&1; echo "${SERVER_CMD:-}"' _ "$d")
-  cl="$CLAUDE"; has_history "$d" && cl="$CLAUDE --continue"
+  cl=$(claude_cmd "$d")
   if [[ -n "$srv" ]]; then
     byobu split-window -h -t "$n:0"
     byobu send-keys -t "$n:0.1" "cd $qd && $srv" Enter
@@ -987,7 +1085,7 @@ start_project() {   # $1 = Projektordner; startet die byobu-Session im Hintergru
   else
     byobu send-keys -t "$n:0" "cd $qd && $cl" Enter
   fi
-  echo "  ✓ started: $n  ($d, $([[ $cl == *continue ]] && echo "last session continued" || echo "new session"))"
+  echo "  ✓ started: $n  ($d, $(start_desc "$cl"))"
 }
 
 restore_all() {
@@ -1004,8 +1102,8 @@ new_session() {
   fi
   echo "→ Starting new byobu session '${BYOBU_SESSION}' …"
   byobu new-session -s "${BYOBU_SESSION}" -d
-  local cl="$CLAUDE --resume"
-  [[ "${NEW_SESSION}" -eq 1 ]] && cl="$CLAUDE"
+  local cl
+  cl=$(claude_cmd "$(abs_dir "$REMOTE_DIR")")
   if [[ -n "${SERVER_CMD}" ]]; then
     # Split-Pane Layout: Claude links, Server rechts
     byobu split-window -h -t "${BYOBU_SESSION}:0"
@@ -1256,7 +1354,7 @@ if [[ "$REMOTE_AUTH" != "ok" ]]; then
     ssh "${SSH_TARGET}" "chmod 600 ~/.claude/.credentials.json"
     echo "  ✓ Login copied"
   else
-    echo "  ⚠ Auth not copied, claude will ask you to log in"
+    echo "  ⚠ Login not copied, claude will ask you to log in"
   fi
 else
   echo "  ✓ Claude auth OK"
@@ -1341,10 +1439,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if command -v mosh &>/dev/null; then
+if [[ $USE_MOSH -eq 1 ]]; then
   echo "→ Connecting to ${SSH_TARGET} via mosh …"
   mosh "$SSH_TARGET" -- bash -lc "$REMOTE_CMD"
 else
-  echo "→ mosh not found, falling back to ssh …"
+  echo "→ Connecting to ${SSH_TARGET} via $TRANSPORT_WHY …"
   ssh -t "$SSH_TARGET" "bash -lc ${QUOTED_CMD}"
 fi
