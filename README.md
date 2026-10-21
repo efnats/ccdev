@@ -44,7 +44,7 @@ Saved projects (not started) in /root/projects:
 
 ```bash
 # 1. Install (see Install for other ways)
-sudo curl -fsSL https://raw.githubusercontent.com/efnats/ccdev/v1.0.1/ccdev -o /usr/local/bin/ccdev
+sudo curl -fsSL https://raw.githubusercontent.com/efnats/ccdev/v1.0.2/ccdev -o /usr/local/bin/ccdev
 sudo chmod +x /usr/local/bin/ccdev
 
 # 2. Connect. ccdev checks the remote and offers to install byobu, mosh and claude if missing.
@@ -61,19 +61,26 @@ Help: `ccdev -h` for the essentials, `ccdev --help` for all options and your cur
 ## Concepts
 
 - **Host**: the machine Claude Code runs on, given as `user@host`, an ssh alias, or a name from the [host inventory](#host-inventory).
-- **Session**: a byobu (tmux) session on the host. It survives disconnects; ccdev attaches to it or creates it.
+- **Connection**: mosh if it is installed locally, otherwise ssh. mosh is made for unreliable links:
+  - **Roaming**: the connection survives a changing IP address, e.g. moving from Wi-Fi to a phone hotspot or VPN.
+  - **Sleep**: close the laptop, open it hours later, and the terminal is still connected; there is no ssh timeout to run into.
+  - **Bad networks**: keystrokes are echoed locally right away, so typing stays responsive on slow or lossy links (trains, hotel Wi-Fi, mobile data).
+  - **No hanging terminal**: if the network drops, mosh says so and reconnects by itself instead of freezing.
+
+  mosh needs `mosh-server` on the host (ccdev offers to install it) and UDP ports 60000-61000 open to it. It has no scrollback of its own; byobu provides that.
+- **Session**: a byobu (tmux) session on the host. It survives disconnects; ccdev attaches to it or creates it. mosh keeps the *connection* alive, byobu keeps the *work* alive: even if your laptop reboots or mosh gives up, Claude keeps running in the session and `ccdev` brings you back to it.
 - **Project**: a directory on the host with a `CLAUDE.md` or `.ccdev` file. ccdev lists projects that are not running yet and starts each in its own session, named after the directory, resuming the last Claude conversation there.
 
 ## Install
 
 ```bash
 # system-wide
-sudo curl -fsSL https://raw.githubusercontent.com/efnats/ccdev/v1.0.1/ccdev -o /usr/local/bin/ccdev
+sudo curl -fsSL https://raw.githubusercontent.com/efnats/ccdev/v1.0.2/ccdev -o /usr/local/bin/ccdev
 sudo chmod +x /usr/local/bin/ccdev
 
 # or just for you (make sure ~/.local/bin is in your PATH)
 mkdir -p ~/.local/bin
-curl -fsSL https://raw.githubusercontent.com/efnats/ccdev/v1.0.1/ccdev -o ~/.local/bin/ccdev
+curl -fsSL https://raw.githubusercontent.com/efnats/ccdev/v1.0.2/ccdev -o ~/.local/bin/ccdev
 chmod +x ~/.local/bin/ccdev
 
 ccdev --version

@@ -2,6 +2,11 @@
 
 All notable changes to ccdev. Versions follow [Semantic Versioning](https://semver.org/); each release is a git tag (`vX.Y.Z`).
 
+## [1.0.2] - 2026-10-22
+
+### Changed
+- README: the Concepts section explains what mosh brings (roaming, surviving sleep, local echo, reconnecting) and how it complements byobu.
+
 ## [1.0.1] - 2026-10-21
 
 ### Changed
