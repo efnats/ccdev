@@ -36,7 +36,8 @@ Options:
       --no-screenshots  Disable automatic screenshot sync
       --new             Start a new Claude session (skip --resume)
       --base DIR        Remote base dir for projects (subdirs with CLAUDE.md or .ccdev;
-                        default: \$CCDEV_BASE, else remote \$HOME)
+                        default: \$CCDEV_BASE, else remote \$HOME;
+                        relative paths are taken from the remote \$HOME)
       --restore         Start byobu sessions for all projects not running yet
                         (claude --continue), then show the session menu
       --sync-auth       Sync local Claude auth to remote host
@@ -183,6 +184,7 @@ set -euo pipefail
 # Wird von ccdev auf dem Zielrechner ausgeführt. Davor setzt ccdev:
 # BYOBU_SESSION REMOTE_DIR NEW_SESSION SERVER_CMD BASE_DIR RESTORE
 BASE_DIR="${BASE_DIR:-$HOME}"
+[[ "$BASE_DIR" != /* ]] && BASE_DIR="$HOME/$BASE_DIR"   # relativ = unter dem $HOME des Zielrechners
 CD_CMD=""
 [[ -n "$REMOTE_DIR" ]] && CD_CMD="cd $(printf '%q' "$REMOTE_DIR") && "
 
