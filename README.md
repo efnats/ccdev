@@ -12,6 +12,7 @@ Connect to a remote Claude Code dev session via mosh/ssh with automatic byobu se
 - **`/ss` slash command** - automatically creates a Claude custom command on the remote to read the latest screenshot
 - **Auth sync** - optionally transfer local Claude credentials to the remote host
 - **Dev server split-pane** - automatically splits the terminal when a `.ccdev` config is found in the project directory
+- **Host inventory** - pick targets by name from static lists, `~/.ssh/config`, Proxmox tags or any command
 
 ## Install
 
@@ -23,6 +24,7 @@ curl -fsSL https://raw.githubusercontent.com/efnats/ccdev/master/ccdev -o /usr/l
 
 ```
 ccdev [OPTIONS] [user@]host [dir]
+ccdev [OPTIONS] [name] [dir]      # with a host inventory
 ```
 
 ### Options
@@ -58,6 +60,51 @@ ccdev --sync-auth root@192.168.1.10
 # Override dev server command from CLI
 ccdev root@192.168.1.10 /opt/myproject --server "npm run dev"
 ```
+
+## Host inventory
+
+Instead of remembering addresses, ccdev can read named targets from one or more sources. Without a host it shows all of them to pick from; with a short name it connects directly:
+
+```bash
+ccdev                  # menu of all targets, grouped by source
+ccdev seedhodler       # exact name, else unique prefix (e.g. seedhodler-dev)
+ccdev proxmox/claude   # SOURCE/NAME when two sources share a name
+ccdev seedhodler /root/claude/seedhodler   # name plus project dir works as with a host
+```
+
+A host containing `.`, `@` or `:` always goes to ssh unchanged, and so does a name that matches nothing. Sources are queried in parallel; a failing source only prints a warning.
+
+Configure the sources in `~/.config/ccdev/config` (or the file named by `$CCDEV_CONFIG`):
+
+```ini
+# Fixed hosts
+[source servers]
+type = static
+host = web1 deploy@203.0.113.10 Hetzner
+host = lab  root@192.168.1.20
+
+# Aliases you already keep in ~/.ssh/config (User/HostName/Port are honoured by ssh)
+[source ssh]
+type   = ssh-config
+match  = dev-* lab-*       # glob(s) on the Host alias, default *
+# marker = ccdev           # alternatively: only Host lines ending in "# ccdev"
+# file = ~/.ssh/config
+
+# Proxmox: LXC containers with a tag, IPs looked up via pvesh over SSH
+[source proxmox]
+type  = proxmox-ssh
+nodes = root@pve1 root@pve2   # first reachable node is used (any node of a cluster works)
+tag   = claude
+user  = root
+
+# Anything else: a command printing NAME<TAB>TARGET[<TAB>STATUS[<TAB>INFO]] per line
+[source tailnet]
+type    = command
+run     = tailscale status --json | jq -r '.Peer[] | select(.Tags // [] | index("tag:dev")) | [.HostName, "root@" + .TailscaleIPs[0], (if .Online then "up" else "off" end), .OS] | @tsv'
+timeout = 10
+```
+
+Comments start with `#` or `;`, also at the end of a line except in `run`. Targets with status `stopped`, `down`, `off` or `offline` are listed but cannot be selected. Without a config file, the environment variables `CCDEV_PVE` (space-separated PVE node SSH targets), `CCDEV_PVE_TAG` and `CCDEV_PVE_USER` still define a single `proxmox-ssh` source.
 
 ## How it works
 

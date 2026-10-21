@@ -12,10 +12,8 @@ SYNC_AUTH=0
 SERVER_CMD=""
 BASE_DIR="${CCDEV_BASE:-}"   # Projekt-Basisverzeichnis auf dem Remote (--base > $CCDEV_BASE > dessen $HOME)
 RESTORE=0
-# Proxmox: ccdev ohne Host listet die LXC-Container mit diesem Tag (per SSH auf einen PVE-Knoten).
-PVE_HOSTS="${CCDEV_PVE:-}"            # SSH-Ziele der PVE-Knoten, leerzeichengetrennt, erster erreichbarer gilt
-PVE_TAG="${CCDEV_PVE_TAG:-claude}"
-PVE_USER="${CCDEV_PVE_USER:-root}"    # Login für die gefundenen Container
+# Inventar: benannte Ziele aus Quellen der Konfigurationsdatei (siehe usage); ccdev ohne Host zeigt sie zur Auswahl.
+CONFIG_FILE="${CCDEV_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/ccdev/config}"
 # Screenshot-Verzeichnis: per --screenshot-dir / CCDEV_SCREENSHOT_DIR überschreibbar.
 # Fallback: $HOME/Pictures/Screenshots, bei root ggf. das des aufrufenden Users (SUDO_USER).
 if [[ -n "${CCDEV_SCREENSHOT_DIR:-}" ]]; then
@@ -29,7 +27,7 @@ fi
 usage() {
   cat <<EOF
 Usage: ccdev [OPTIONS] [user@]host [dir]
-       ccdev [OPTIONS]                  # with \$CCDEV_PVE: pick a tagged Proxmox container
+       ccdev [OPTIONS] [name] [dir]     # pick from the host inventory (see below)
 
 Options:
   -u, --user USER       SSH username (overrides user in user@host)
@@ -48,13 +46,22 @@ Options:
       --sync-auth       Sync local Claude auth to remote host
   -h, --help            Show this help
 
-Proxmox (optional):
-  CCDEV_PVE="root@pve1 root@pve2"   SSH targets of PVE nodes (first reachable one is used)
-  CCDEV_PVE_TAG=claude              only LXC containers with this tag (default: claude)
-  CCDEV_PVE_USER=root               login user for those containers (default: root)
-  Without a host, ccdev lists the tagged containers with their IPs to pick from.
-  A host without "." or "@" is first matched against their names (unique prefix,
-  e.g. "seedhodler" for seedhodler-dev); if nothing matches it goes to ssh as is.
+Host inventory (optional): ~/.config/ccdev/config, or \$CCDEV_CONFIG
+  [source NAME]           one block per source, NAME is shown in the menu
+  type = static           host = NAME TARGET [INFO]       (repeatable)
+  type = ssh-config       match = GLOB...   Host aliases from ~/.ssh/config (default: *)
+                          marker = WORD     only Host lines carrying "# WORD" (optional)
+                          file = PATH...    (default: ~/.ssh/config)
+  type = proxmox-ssh      nodes = root@pve1 root@pve2     (first reachable one is used)
+                          tag = claude      LXC containers with this tag (default: claude)
+                          user = root       login user for them (default: root)
+  type = command          run = CMD         prints lines: NAME<TAB>TARGET[<TAB>STATUS[<TAB>INFO]]
+                          timeout = 20      seconds
+  Without a host, ccdev lists all targets to pick from. A host without ".", "@"
+  or ":" is first matched against the names (exact, else prefix; SOURCE/NAME
+  limits it to one source); no match goes to ssh as is.
+  Without a config file, CCDEV_PVE ("root@pve1 root@pve2"), CCDEV_PVE_TAG and
+  CCDEV_PVE_USER still define one proxmox-ssh source.
 
 Examples:
   ccdev root@192.168.1.10
@@ -125,11 +132,79 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# --- Proxmox: getaggte Container mit IP (Tab-getrennt: vmid node name status ip) ---
-pve_list() {
-  local h
-  for h in $PVE_HOSTS; do
-    ssh -o ConnectTimeout=5 -o BatchMode=yes "$h" python3 - "$PVE_TAG" <<'PY' 2>/dev/null && return 0
+# --- Inventar: Quellen aus der Konfigurationsdatei ---
+SRC_NAME=(); SRC_TYPE=(); declare -A SRC_OPT=()   # SRC_OPT["i:key"], wiederholte Schlüssel zeilenweise
+
+load_config() {
+  local line key val i=-1 n=0
+  local re_src='^\[source[[:space:]]+([^]]+)\]$' re_kv='^([A-Za-z_]+)[[:space:]]*=[[:space:]]*(.*)$'
+  if [[ -f "$CONFIG_FILE" ]]; then
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      n=$((n + 1))
+      line="${line#"${line%%[![:space:]]*}"}"; line="${line%"${line##*[![:space:]]}"}"
+      [[ -z "$line" || "$line" == [\#\;]* ]] && continue
+      if [[ "$line" =~ $re_src ]]; then
+        i=$((i + 1)); SRC_NAME[i]="${BASH_REMATCH[1]}"; SRC_TYPE[i]=""
+      elif [[ $i -ge 0 && "$line" =~ $re_kv ]]; then
+        key="${BASH_REMATCH[1]}"; val="${BASH_REMATCH[2]}"
+        if [[ "$key" != run ]]; then   # Kommentar am Zeilenende (nicht bei run, Befehle dürfen # enthalten)
+          val="${val%%[[:space:]]#*}"; val="${val%"${val##*[![:space:]]}"}"
+        fi
+        if [[ "$key" == type ]]; then
+          SRC_TYPE[i]="$val"
+        else
+          SRC_OPT["$i:$key"]+="${SRC_OPT["$i:$key"]:+$'\n'}$val"
+        fi
+      else
+        echo "Warning: $CONFIG_FILE:$n ignored: $line" >&2
+      fi
+    done <"$CONFIG_FILE"
+  elif [[ -n "${CCDEV_PVE:-}" ]]; then   # Altform per Umgebung
+    SRC_NAME=(proxmox); SRC_TYPE=(proxmox-ssh)
+    SRC_OPT["0:nodes"]="$CCDEV_PVE"
+    SRC_OPT["0:tag"]="${CCDEV_PVE_TAG:-claude}"
+    SRC_OPT["0:user"]="${CCDEV_PVE_USER:-root}"
+  fi
+}
+opt() { echo "${SRC_OPT["$1:$2"]:-${3:-}}"; }   # opt INDEX KEY [DEFAULT]
+
+# Jede Quelle gibt Zeilen NAME<TAB>ZIEL<TAB>STATUS<TAB>INFO aus.
+src_static() {
+  local l name target info
+  while IFS= read -r l; do
+    read -r name target info <<<"$l"
+    [[ -n "$target" ]] && printf '%s\t%s\t?\t%s\n' "$name" "$target" "$info"
+  done <<<"$(opt "$1" host)"
+}
+
+# shellcheck disable=SC2254  # match-Werte sind bewusst Muster
+src_ssh_config() {
+  local - i="$1" f l a m ok marker globs aliases comment hn
+  set -f   # Muster nicht gegen Dateien expandieren
+  local re_host='^[[:space:]]*[Hh][Oo][Ss][Tt][[:space:]]+([^#]*)(#.*)?$'
+  marker=$(opt "$i" marker); globs=$(opt "$i" match '*')
+  for f in $(opt "$i" file "$HOME/.ssh/config"); do
+    f="${f/#\~/$HOME}"; [[ -f "$f" ]] || continue
+    while IFS= read -r l; do
+      [[ "$l" =~ $re_host ]] || continue
+      aliases="${BASH_REMATCH[1]}"; comment="${BASH_REMATCH[2]:-}"
+      [[ -n "$marker" && "$comment" != *"$marker"* ]] && continue
+      for a in $aliases; do
+        [[ "$a" == *[\*\?\!]* ]] && continue
+        ok=0; for m in $globs; do case "$a" in $m) ok=1 ;; esac; done
+        [[ $ok -eq 1 ]] || continue
+        hn=$(ssh -G -F "$f" "$a" </dev/null 2>/dev/null | awk '$1 == "user" {u = $2} $1 == "hostname" {h = $2} END {print u "@" h}')
+        printf '%s\t%s\t?\t%s\n' "$a" "$a" "$hn"
+      done
+    done <"$f"
+  done
+}
+
+src_proxmox_ssh() {
+  local i="$1" h user rows id node name st ip
+  user=$(opt "$i" user root)
+  for h in $(opt "$i" nodes); do
+    rows=$(ssh -o ConnectTimeout=5 -o BatchMode=yes "$h" python3 - "$(opt "$i" tag claude)" <<'PY' 2>/dev/null
 import json, subprocess, sys
 from concurrent.futures import ThreadPoolExecutor
 tag = sys.argv[1]
@@ -150,54 +225,106 @@ with ThreadPoolExecutor(8) as ex:
 for r, a in zip(cts, ips):
     print(r["vmid"], r["node"], r["name"], r["status"], a, sep="\t")
 PY
+) || continue
+    while IFS=$'\t' read -r id node name st ip; do
+      [[ -z "$id" ]] && continue
+      [[ "$ip" == - ]] || ip="$user@$ip"
+      printf '%s\t%s\t%s\t%s\n' "$name" "$ip" "$st" "CT$id $node"
+    done <<<"$rows"
+    return 0
   done
+  echo "no node reachable ($(opt "$i" nodes | tr '\n' ' '))" >&2
   return 1
 }
 
-# Setzt TARGET auf PVE_USER@ip. $1 = Namensanfang (leer = alle). Rückgabe 1 = kein Treffer.
-pve_pick() {
-  local rows prefix="${1:-}" id node name st ip n
-  if ! rows=$(pve_list); then
-    echo "Warning: no Proxmox node reachable ($PVE_HOSTS)." >&2
-    [[ -n "$prefix" ]] && return 1
-    exit 1
-  fi
-  local -a ROWS=()
-  while IFS= read -r line; do
-    [[ -z "$line" ]] && continue
-    IFS=$'\t' read -r id node name st ip <<<"$line"
-    [[ -z "$prefix" || "$name" == "$prefix"* ]] && ROWS+=("$line")
-  done <<<"$rows"
-  [[ ${#ROWS[@]} -eq 0 ]] && return 1
-  if [[ ${#ROWS[@]} -eq 1 && -n "$prefix" ]]; then
-    n=1
-  else
-    echo "Proxmox-Container mit Tag \"$PVE_TAG\":"
-    for i in "${!ROWS[@]}"; do
-      IFS=$'\t' read -r id node name st ip <<<"${ROWS[$i]}"
-      [[ "$st" == running ]] || ip="(aus)"
-      printf '  [%d] %-18s CT%-5s %-8s %s\n' $((i + 1)) "$name" "$id" "$node" "$ip"
-    done
-    read -rp "Auswahl: " n </dev/tty
-    [[ "$n" =~ ^[0-9]+$ && "$n" -ge 1 && "$n" -le ${#ROWS[@]} ]] || { echo "Abbruch." >&2; exit 1; }
-  fi
-  IFS=$'\t' read -r id node name st ip <<<"${ROWS[$((n - 1))]}"
-  [[ "$st" == running && "$ip" != "-" ]] || { echo "Error: CT$id $name is not running (or has no IP)." >&2; exit 1; }
-  echo "→ $name (CT$id, $node): $PVE_USER@$ip"
-  TARGET="$PVE_USER@$ip"
+src_command() {
+  local cmd t
+  cmd=$(opt "$1" run); t=$(opt "$1" timeout 20)
+  [[ -n "$cmd" ]] || { echo "run = … missing" >&2; return 1; }
+  if command -v timeout &>/dev/null; then timeout "$t" bash -c "$cmd"; else bash -c "$cmd"; fi
 }
 
+# Alle Quellen parallel; Ausgabe QUELLE<TAB>NAME<TAB>ZIEL<TAB>STATUS<TAB>INFO in Konfigurationsreihenfolge.
+inventory() {
+  local tmp i fn name target st info
+  tmp=$(mktemp -d)
+  for i in "${!SRC_NAME[@]}"; do
+    case "${SRC_TYPE[i]}" in
+      static)      fn=src_static ;;
+      ssh-config)  fn=src_ssh_config ;;
+      proxmox-ssh) fn=src_proxmox_ssh ;;
+      command)     fn=src_command ;;
+      *) echo "Warning: source '${SRC_NAME[i]}': unknown type '${SRC_TYPE[i]}'" >&2; continue ;;
+    esac
+    ( "$fn" "$i" >"$tmp/$i" 2>"$tmp/$i.err" \
+        || echo "Warning: source '${SRC_NAME[i]}' failed: $(head -1 "$tmp/$i.err")" >&2 ) &
+  done
+  wait
+  for i in "${!SRC_NAME[@]}"; do
+    [[ -f "$tmp/$i" ]] || continue
+    while IFS=$'\t' read -r name target st info; do
+      [[ -n "$name" && -n "$target" ]] || continue
+      printf '%s\t%s\t%s\t%s\t%s\n' "${SRC_NAME[i]}" "$name" "$target" "${st:-?}" "$info"
+    done <"$tmp/$i"
+  done
+  rm -rf "$tmp"
+}
+
+is_up() { [[ "$2" != - ]] && case "$1" in stopped|down|off|offline) false ;; *) true ;; esac; }
+
+# Setzt TARGET. $1 = Name, Namensanfang oder QUELLE/NAME (leer = alle zeigen). Rückgabe 1 = kein Treffer.
+pick_target() {
+  local want="${1:-}" wsrc="" wname l pass src name target st info n="" last=""
+  local -a ALL=() HIT=()
+  while IFS= read -r l; do [[ -n "$l" ]] && ALL+=("$l"); done <<<"$(inventory)"
+  if [[ -z "$want" ]]; then
+    HIT=("${ALL[@]}")
+  else
+    wname="$want"
+    [[ "$want" == */* ]] && { wsrc="${want%%/*}"; wname="${want#*/}"; }
+    for pass in exact prefix; do
+      for l in "${ALL[@]}"; do
+        IFS=$'\t' read -r src name target st info <<<"$l"
+        [[ -n "$wsrc" && "$src" != "$wsrc" ]] && continue
+        if [[ $pass == exact && "$name" == "$wname" ]] || [[ $pass == prefix && "$name" == "$wname"* ]]; then
+          HIT+=("$l")
+        fi
+      done
+      [[ ${#HIT[@]} -gt 0 ]] && break
+    done
+  fi
+  [[ ${#HIT[@]} -eq 0 ]] && return 1
+  if [[ ${#HIT[@]} -eq 1 && -n "$want" ]]; then
+    n=1
+  else
+    echo "Ziele:"
+    for i in "${!HIT[@]}"; do
+      IFS=$'\t' read -r src name target st info <<<"${HIT[$i]}"
+      [[ "$src" != "$last" ]] && { echo "  $src"; last="$src"; }
+      is_up "$st" "$target" || target="(aus)"
+      printf '    [%d] %-18s %-24s %s\n' $((i + 1)) "$name" "$target" "$info"
+    done
+    read -rp "Auswahl: " n </dev/tty || true
+    [[ "$n" =~ ^[0-9]+$ && "$n" -ge 1 && "$n" -le ${#HIT[@]} ]] || { echo "Abbruch." >&2; exit 1; }
+  fi
+  IFS=$'\t' read -r src name target st info <<<"${HIT[$((n - 1))]}"
+  is_up "$st" "$target" || { echo "Error: $src/$name is $st (no target)." >&2; exit 1; }
+  echo "→ $name ($src${info:+, $info}): $target"
+  TARGET="$target"
+}
+
+load_config
 if [[ ${#POSITIONAL[@]} -eq 0 ]]; then
-  if [[ -n "$PVE_HOSTS" ]]; then
-    pve_pick "" || { echo "Error: no Proxmox container with tag \"$PVE_TAG\"." >&2; exit 1; }
+  if [[ ${#SRC_NAME[@]} -gt 0 ]]; then
+    pick_target "" || { echo "Error: no targets found in the inventory ($CONFIG_FILE)." >&2; exit 1; }
   else
     echo "Error: no host specified." >&2
     usage
   fi
 else
   TARGET="${POSITIONAL[0]}"
-  if [[ -n "$PVE_HOSTS" && "$TARGET" != *[.@:]* ]]; then
-    pve_pick "$TARGET" || true    # kein Treffer: Host unverändert an ssh (z. B. Alias aus ~/.ssh/config)
+  if [[ ${#SRC_NAME[@]} -gt 0 && "$TARGET" != *[.@:]* ]]; then
+    pick_target "$TARGET" || true   # kein Treffer: Host unverändert an ssh
   fi
 fi
 
@@ -228,10 +355,10 @@ if [[ -n "$USER_OVERRIDE" ]]; then
 elif [[ -n "$PARSED_USER" ]]; then
   SSH_USER="$PARSED_USER"
 else
-  SSH_USER="$USER"
+  SSH_USER=""   # ssh entscheidet: User aus ~/.ssh/config, sonst lokaler Benutzer
 fi
 
-SSH_TARGET="${SSH_USER}@${HOST}"
+SSH_TARGET="${SSH_USER:+${SSH_USER}@}${HOST}"
 
 # --- Read .ccdev config from remote project dir ---
 if [[ -z "$SERVER_CMD" && -n "$REMOTE_DIR" ]]; then
