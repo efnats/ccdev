@@ -44,7 +44,7 @@ Saved projects (not started) in /root/projects:
 
 ```bash
 # 1. Install (see Install for other ways)
-sudo curl -fsSL https://raw.githubusercontent.com/efnats/ccdev/v1.1.0/ccdev -o /usr/local/bin/ccdev
+sudo curl -fsSL https://raw.githubusercontent.com/efnats/ccdev/v1.1.1/ccdev -o /usr/local/bin/ccdev
 sudo chmod +x /usr/local/bin/ccdev
 
 # 2. Connect. ccdev checks the remote and offers to install byobu, mosh and claude if missing.
@@ -75,12 +75,12 @@ Help: `ccdev -h` for the essentials, `ccdev --help` for all options and your cur
 
 ```bash
 # system-wide
-sudo curl -fsSL https://raw.githubusercontent.com/efnats/ccdev/v1.1.0/ccdev -o /usr/local/bin/ccdev
+sudo curl -fsSL https://raw.githubusercontent.com/efnats/ccdev/v1.1.1/ccdev -o /usr/local/bin/ccdev
 sudo chmod +x /usr/local/bin/ccdev
 
 # or just for you (make sure ~/.local/bin is in your PATH)
 mkdir -p ~/.local/bin
-curl -fsSL https://raw.githubusercontent.com/efnats/ccdev/v1.1.0/ccdev -o ~/.local/bin/ccdev
+curl -fsSL https://raw.githubusercontent.com/efnats/ccdev/v1.1.1/ccdev -o ~/.local/bin/ccdev
 chmod +x ~/.local/bin/ccdev
 
 ccdev --version
@@ -102,7 +102,7 @@ echo 'eval "$(ccdev --completion bash)"' >> ~/.bashrc
 ccdev root@192.168.1.10                 # session manager on the host
 ccdev -u deploy 192.168.1.10            # user given separately
 ccdev myalias                           # ssh alias from ~/.ssh/config (User, Port, … apply)
-ccdev --fresh root@192.168.1.10 /opt/app  # new Claude conversation instead of continuing
+ccdev --new root@192.168.1.10 /opt/app    # new Claude conversation instead of continuing
 ccdev --pick root@192.168.1.10 /opt/app   # choose one of the earlier conversations
 ccdev --ssh root@192.168.1.10            # ssh even though mosh is installed (UDP blocked)
 ccdev --dry-run myhost /opt/app          # show what would happen, connect to nothing
@@ -122,7 +122,7 @@ ccdev --base /srv/work root@192.168.1.10   # look for projects in another direct
 
 The base dir defaults to the remote `$HOME`. `CCDEV_BASE` sets it for all hosts; a relative value is taken from the remote `$HOME`, so `export CCDEV_BASE=projects` means `/root/projects` for root and `/home/alice/projects` for alice.
 
-When you give a directory (`ccdev host /opt/app`) and no session is running on the host yet, ccdev starts a session for it right away. Claude continues the last conversation in that directory (`claude --continue`, plain `claude` without history); `--fresh` starts a new one, `--pick` lets you choose. The same applies to projects started from the menu and to `--restore`. If sessions are running, it shows the menu; `[n]` creates the session, named after the directory by default.
+When you give a directory (`ccdev host /opt/app`) and no session is running on the host yet, ccdev starts a session for it right away. Claude continues the last conversation in that directory (`claude --continue`, plain `claude` without history); `--new` starts a new one, `--pick` lets you choose. The same applies to projects started from the menu and to `--restore`. If sessions are running, it shows the menu; `[n]` creates the session, named after the directory by default.
 
 ### Host inventory
 
@@ -193,7 +193,7 @@ Without either, Claude uses the default from `~/.claude/settings.json` on the ho
 | `-n, --name NAME` | byobu session name (default: directory name, else `claude`) |
 | `--base DIR` | Where to look for projects on the host (relative to the remote `$HOME` unless absolute) |
 | `--restore` | Start sessions for all saved projects, then show the menu |
-| `--fresh` | Start a new Claude conversation instead of continuing the last one |
+| `--new` | Start a new Claude conversation instead of continuing the last one |
 | `--pick` | Choose a conversation from Claude's list (`claude --resume`) |
 | `--mode MODE` | Claude permission mode (`auto`, `plan`, …) |
 | `--init` | Set up the host inventory interactively |
@@ -208,7 +208,7 @@ Without either, Claude uses the default from `~/.claude/settings.json` on the ho
 | `-h` | Short help |
 | `--help [TOPIC]` | All options and your current setup, or a topic: `inventory`, `projects`, `env` |
 
-Renamed in 1.1.0, the old names still work: `--new` → `--fresh`, `-s`/`--server` → `--dev`, `--sync-auth` → `--copy-login`. `-d`/`--dir` (same as the second argument) and `-S` are still accepted but no longer documented.
+Renamed in 1.1.0, the old names still work: `-s`/`--server` → `--dev`, `--sync-auth` → `--copy-login` (`--fresh` from 1.1.0 is accepted as an alias of `--new`). `-d`/`--dir` (same as the second argument) and `-S` are still accepted but no longer documented.
 
 ### Environment
 

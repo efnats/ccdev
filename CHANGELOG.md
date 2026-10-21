@@ -2,6 +2,11 @@
 
 All notable changes to ccdev. Versions follow [Semantic Versioning](https://semver.org/); each release is a git tag (`vX.Y.Z`).
 
+## [1.1.1] - 2026-10-22
+
+### Changed
+- `--new` is the documented name again for starting a new Claude conversation; `--fresh` (1.1.0) keeps working as an alias.
+
 ## [1.1.0] - 2026-10-22
 
 ### Added

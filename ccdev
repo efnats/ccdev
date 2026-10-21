@@ -3,12 +3,12 @@
 
 set -euo pipefail
 
-VERSION="1.1.0"
+VERSION="1.1.1"
 BYOBU_SESSION=""
 USER_OVERRIDE=""
 REMOTE_DIR=""
 NO_SCREENSHOTS=0
-START="continue"  # Claude-Start: continue (Standard), fresh (--fresh), pick (--pick)
+START="continue"  # Claude-Start: continue (Standard), fresh (--new), pick (--pick)
 START_CLI=""
 SYNC_AUTH=0     # --copy-login
 TRANSPORT=auto  # auto (mosh wenn vorhanden), mosh, ssh; --ssh / [settings] transport
@@ -57,7 +57,7 @@ Usage: ccdev [OPTIONS] [HOST|NAME] [DIR]
   ccdev --restore myhost        after a reboot: start all saved projects
 
 Common options:
-  -u USER       ssh user               --fresh      new Claude conversation
+  -u USER       ssh user               --new        new Claude conversation
   -n NAME       session name           --pick       choose a conversation
   --base DIR    where projects live    --mode MODE  Claude permission mode (auto, plan, ...)
   --ssh         ssh instead of mosh    --dry-run    show what would happen
@@ -99,7 +99,7 @@ Projects and sessions:
       --restore            start sessions for all saved projects, then the menu
 
 Claude (for sessions ccdev starts; default: continue the last conversation):
-      --fresh              start a new conversation
+      --new                start a new conversation
       --pick               choose a conversation from Claude's list
       --mode MODE          permission mode, e.g. manual, acceptEdits, auto, plan
                            (default: [settings] permission_mode, else the host's
@@ -221,7 +221,7 @@ saved projects, [n] creates a new session, [q] quits; for a session [a]ttach,
 [k]ill or [b]ack.
 
 Claude starts with "claude --continue" (the last conversation in that directory,
-plain "claude" without history); --fresh starts a new one, --pick shows Claude's
+plain "claude" without history); --new starts a new one, --pick shows Claude's
 list of conversations to choose from.
 The base dir defaults to the remote $HOME; CCDEV_BASE or --base change it, and
 a relative value starts at the remote $HOME (CCDEV_BASE=claude is /root/claude
@@ -282,7 +282,7 @@ _ccdev() {
     --mode) COMPREPLY=($(compgen -W "manual acceptEdits auto plan dontAsk bypassPermissions" -- "$cur")); return ;;
   esac
   if [[ "$cur" == -* ]]; then
-    COMPREPLY=($(compgen -W "-u --user -n --name --dev --screenshot-dir --no-screenshots --fresh --pick
+    COMPREPLY=($(compgen -W "-u --user -n --name --dev --screenshot-dir --no-screenshots --new --pick
       --base --restore --copy-login --mode --ssh --dry-run --init --refresh --list --completion -h --help
       --version" -- "$cur"))
     return
@@ -347,13 +347,13 @@ while [[ $# -gt 0 ]]; do
       SYNC_AUTH=1
       shift
       ;;
-    --fresh|--new)   # --new veraltet
-      [[ "$START_CLI" == pick ]] && die_usage "--fresh and --pick exclude each other"
+    --new|--fresh)   # --fresh: Alias aus 1.1.0
+      [[ "$START_CLI" == pick ]] && die_usage "--new and --pick exclude each other"
       START_CLI=fresh
       shift
       ;;
     --pick)
-      [[ "$START_CLI" == fresh ]] && die_usage "--fresh and --pick exclude each other"
+      [[ "$START_CLI" == fresh ]] && die_usage "--new and --pick exclude each other"
       START_CLI=pick
       shift
       ;;
