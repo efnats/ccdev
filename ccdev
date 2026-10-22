@@ -3,7 +3,7 @@
 
 set -euo pipefail
 
-VERSION="1.1.1"
+VERSION="2.0.0"
 BYOBU_SESSION=""
 USER_OVERRIDE=""
 REMOTE_DIR=""
@@ -274,8 +274,8 @@ completion_script() {
 _ccdev() {
   local cur="${COMP_WORDS[COMP_CWORD]}" prev="${COMP_WORDS[COMP_CWORD-1]}" w i n=0
   case "$prev" in
-    -u|--user|-n|--name|-s|--server|--dev|-d|--dir|--base) return ;;
-    -S|--screenshot-dir) COMPREPLY=($(compgen -d -- "$cur")); return ;;
+    -u|--user|-n|--name|--dev|--base) return ;;
+    --screenshot-dir) COMPREPLY=($(compgen -d -- "$cur")); return ;;
     --list) COMPREPLY=($(compgen -W "table tsv json" -- "$cur")); return ;;
     --completion) COMPREPLY=($(compgen -W "bash" -- "$cur")); return ;;
     --help) COMPREPLY=($(compgen -W "inventory projects env" -- "$cur")); return ;;
@@ -291,7 +291,7 @@ _ccdev() {
   for ((i = 1; i < COMP_CWORD; i++)); do
     w="${COMP_WORDS[i]}"
     case "$w" in
-      -u|--user|-d|--dir|-n|--name|-s|--server|--dev|-S|--screenshot-dir|--base|--completion|--mode) ((i++)) ;;
+      -u|--user|-n|--name|--dev|--screenshot-dir|--base|--completion|--mode) ((i++)) ;;
       -*) ;;
       *) n=$((n + 1)) ;;
     esac
@@ -318,22 +318,26 @@ while [[ $# -gt 0 ]]; do
       USER_OVERRIDE="$2"
       shift 2
       ;;
-    -d|--dir)   # veraltet: wie das zweite Argument
-      need_arg "$@"
-      REMOTE_DIR="$2"
-      shift 2
+    -d|--dir|-s|--server|-S|--sync-auth|--fresh)   # in 2.0.0 entfernt
+      case "$1" in
+        -d|--dir)    die_usage "$1 was removed in 2.0.0; give the directory as the second argument" ;;
+        -s|--server) die_usage "$1 was removed in 2.0.0; use --dev" ;;
+        -S)          die_usage "-S was removed in 2.0.0; use --screenshot-dir" ;;
+        --sync-auth) die_usage "--sync-auth was removed in 2.0.0; use --copy-login" ;;
+        --fresh)     die_usage "--fresh was removed in 2.0.0; use --new" ;;
+      esac
       ;;
     -n|--name)
       need_arg "$@"
       BYOBU_SESSION="$2"
       shift 2
       ;;
-    --dev|-s|--server)   # -s/--server veraltet
+    --dev)
       need_arg "$@"
       SERVER_CMD="$2"
       shift 2
       ;;
-    --screenshot-dir|-S)   # -S veraltet
+    --screenshot-dir)
       need_arg "$@"
       LOCAL_SCREENSHOT_DIR="$2"
       SS_DIR_CLI=1
@@ -343,11 +347,11 @@ while [[ $# -gt 0 ]]; do
       NO_SCREENSHOTS=1
       shift
       ;;
-    --copy-login|--sync-auth)   # --sync-auth veraltet
+    --copy-login)
       SYNC_AUTH=1
       shift
       ;;
-    --new|--fresh)   # --fresh: Alias aus 1.1.0
+    --new)
       [[ "$START_CLI" == pick ]] && die_usage "--new and --pick exclude each other"
       START_CLI=fresh
       shift
@@ -923,7 +927,7 @@ else
   fi
 fi
 
-if [[ ${#POSITIONAL[@]} -ge 2 && -z "$REMOTE_DIR" ]]; then
+if [[ ${#POSITIONAL[@]} -ge 2 ]]; then
   REMOTE_DIR="${POSITIONAL[1]}"
 fi
 

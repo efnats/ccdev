@@ -2,6 +2,11 @@
 
 All notable changes to ccdev. Versions follow [Semantic Versioning](https://semver.org/); each release is a git tag (`vX.Y.Z`).
 
+## [2.0.0] - 2026-10-22
+
+### Removed
+- Old option names, deprecated in 1.1.0: `-d`/`--dir` (give the directory as the second argument), `-s`/`--server` (use `--dev`), `-S` (use `--screenshot-dir`), `--sync-auth` (use `--copy-login`) and `--fresh` (use `--new`). Using one of them stops with a message naming the replacement.
+
 ## [1.1.1] - 2026-10-22
 
 ### Changed

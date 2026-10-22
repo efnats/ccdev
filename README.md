@@ -44,7 +44,7 @@ Saved projects (not started) in /root/projects:
 
 ```bash
 # 1. Install (see Install for other ways)
-sudo curl -fsSL https://raw.githubusercontent.com/efnats/ccdev/v1.1.1/ccdev -o /usr/local/bin/ccdev
+sudo curl -fsSL https://raw.githubusercontent.com/efnats/ccdev/v2.0.0/ccdev -o /usr/local/bin/ccdev
 sudo chmod +x /usr/local/bin/ccdev
 
 # 2. Connect. ccdev checks the remote and offers to install byobu, mosh and claude if missing.
@@ -75,12 +75,12 @@ Help: `ccdev -h` for the essentials, `ccdev --help` for all options and your cur
 
 ```bash
 # system-wide
-sudo curl -fsSL https://raw.githubusercontent.com/efnats/ccdev/v1.1.1/ccdev -o /usr/local/bin/ccdev
+sudo curl -fsSL https://raw.githubusercontent.com/efnats/ccdev/v2.0.0/ccdev -o /usr/local/bin/ccdev
 sudo chmod +x /usr/local/bin/ccdev
 
 # or just for you (make sure ~/.local/bin is in your PATH)
 mkdir -p ~/.local/bin
-curl -fsSL https://raw.githubusercontent.com/efnats/ccdev/v1.1.1/ccdev -o ~/.local/bin/ccdev
+curl -fsSL https://raw.githubusercontent.com/efnats/ccdev/v2.0.0/ccdev -o ~/.local/bin/ccdev
 chmod +x ~/.local/bin/ccdev
 
 ccdev --version
@@ -208,7 +208,7 @@ Without either, Claude uses the default from `~/.claude/settings.json` on the ho
 | `-h` | Short help |
 | `--help [TOPIC]` | All options and your current setup, or a topic: `inventory`, `projects`, `env` |
 
-Renamed in 1.1.0, the old names still work: `-s`/`--server` → `--dev`, `--sync-auth` → `--copy-login` (`--fresh` from 1.1.0 is accepted as an alias of `--new`). `-d`/`--dir` (same as the second argument) and `-S` are still accepted but no longer documented.
+Removed in 2.0.0: `-d`/`--dir` (use the second argument), `-s`/`--server` (`--dev`), `-S` (`--screenshot-dir`), `--sync-auth` (`--copy-login`) and `--fresh` (`--new`). ccdev names the replacement if you use one of them.
 
 ### Environment
 
