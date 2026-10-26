@@ -44,7 +44,7 @@ Saved projects (not started) in /root/projects:
 
 ```bash
 # 1. Install (see Install for other ways)
-sudo curl -fsSL https://raw.githubusercontent.com/efnats/ccdev/v2.0.0/ccdev -o /usr/local/bin/ccdev
+sudo curl -fsSL https://raw.githubusercontent.com/efnats/ccdev/master/ccdev -o /usr/local/bin/ccdev
 sudo chmod +x /usr/local/bin/ccdev
 
 # 2. Connect. ccdev checks the remote and offers to install byobu, mosh and claude if missing.
@@ -75,18 +75,18 @@ Help: `ccdev -h` for the essentials, `ccdev --help` for all options and your cur
 
 ```bash
 # system-wide
-sudo curl -fsSL https://raw.githubusercontent.com/efnats/ccdev/v2.0.0/ccdev -o /usr/local/bin/ccdev
+sudo curl -fsSL https://raw.githubusercontent.com/efnats/ccdev/master/ccdev -o /usr/local/bin/ccdev
 sudo chmod +x /usr/local/bin/ccdev
 
 # or just for you (make sure ~/.local/bin is in your PATH)
 mkdir -p ~/.local/bin
-curl -fsSL https://raw.githubusercontent.com/efnats/ccdev/v2.0.0/ccdev -o ~/.local/bin/ccdev
+curl -fsSL https://raw.githubusercontent.com/efnats/ccdev/master/ccdev -o ~/.local/bin/ccdev
 chmod +x ~/.local/bin/ccdev
 
 ccdev --version
 ```
 
-Releases are git tags (`v1.0.0`, …), see [CHANGELOG.md](CHANGELOG.md). To **update**, run the same command with the new tag; `master` is the development branch. To **uninstall**, delete the script and, if you used them, `~/.config/ccdev/` and `~/.cache/ccdev/` (see [Files](#files)).
+These commands install the current version from `master`; to **update**, run the same command again. Larger releases are also tagged (`v2.0.0`, …, see [CHANGELOG.md](CHANGELOG.md)); to stay on one, replace `master` in the URL with the tag. To **uninstall**, delete the script and, if you used them, `~/.config/ccdev/` and `~/.cache/ccdev/` (see [Files](#files)).
 
 Tab completion (bash; zsh after `autoload -U bashcompinit && bashcompinit`):
 
