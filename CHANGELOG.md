@@ -2,6 +2,11 @@
 
 All notable changes to ccdev. Versions follow [Semantic Versioning](https://semver.org/); each release is a git tag (`vX.Y.Z`).
 
+## [Unreleased]
+
+### Fixed
+- `ccdev --init`, Proxmox source: a node given without a user (e.g. `192.168.1.10`) made ssh log in as the local user and the check failed without saying why. The wizard now offers `root@` for such nodes (unless `~/.ssh/config` sets a user), and a failed check names the reason: login refused for that user, unknown host key, host name not found, SSH port closed, not reachable, or pvesh/python3 missing on the host.
+
 ## [2.0.0] - 2026-10-22
 
 ### Removed

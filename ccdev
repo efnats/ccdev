@@ -3,7 +3,7 @@
 
 set -euo pipefail
 
-VERSION="2.0.0"
+VERSION="2.0.1-dev"
 BYOBU_SESSION=""
 USER_OVERRIDE=""
 REMOTE_DIR=""
@@ -791,18 +791,51 @@ init_ssh_config() {
   echo "match = $match"
 }
 
+# Prüft einen Proxmox-Knoten per SSH; bei Erfolg 0, sonst der Grund auf stderr
+pve_check() {
+  local t="$1" out rc user why
+  out=$(ssh -o BatchMode=yes -o ConnectTimeout=5 "$t" \
+    'for c in pvesh python3; do command -v "$c" >/dev/null || echo "missing:$c"; done' 2>&1 </dev/null) && rc=0 || rc=$?
+  if [[ $rc -eq 0 && "$out" != *missing:* ]]; then
+    echo "  ✓ $t reachable (pvesh, python3)" >&2
+    return 0
+  fi
+  if [[ "$t" == *@* ]]; then user="${t%%@*}"; else user=$(ssh -G "$t" 2>/dev/null | awk '$1 == "user" {print $2}'); fi
+  if [[ $rc -eq 0 ]]; then
+    why="logged in, but missing on the host: $(grep -o 'missing:[a-z0-9]*' <<<"$out" | cut -d: -f2 | tr '\n' ' ')(not a Proxmox node?)"
+  else
+    case "$out" in
+      *"Permission denied"*)          why="login refused for user '$user': no SSH key accepted (ssh-copy-id $t, or check the user)" ;;
+      *"Host key verification failed"*) why="host key not known yet: connect once with 'ssh $t' and accept it" ;;
+      *"Could not resolve hostname"*) why="host name not found" ;;
+      *"Connection refused"*)         why="SSH port closed (connection refused)" ;;
+      *"timed out"*|*"No route to host"*|*"Network is unreachable"*) why="not reachable (timeout or no route)" ;;
+      *)                              why="ssh failed: $(head -1 <<<"$out")" ;;
+    esac
+  fi
+  echo "  ✗ $t: $why" >&2
+  return 1
+}
+
 init_proxmox() {
-  local nodes tag user types n ok=0
-  ask nodes "  SSH targets of the Proxmox nodes, space-separated" "${CCDEV_PVE:-root@}"
-  [[ -n "$nodes" && "$nodes" != root@ ]] || { echo "  No nodes, no source." >&2; return 1; }
-  for n in $nodes; do
-    if ssh -o BatchMode=yes -o ConnectTimeout=5 "$n" 'command -v pvesh >/dev/null && command -v python3 >/dev/null' 2>/dev/null; then
-      echo "  ✓ $n reachable (pvesh, python3)" >&2; ok=1
-    else
-      echo "  ✗ $n not reachable or without pvesh/python3 (needs an SSH key that works without a password prompt)" >&2
+  local nodes="" tag user types n u yn ok=0
+  ask n "  SSH targets of the Proxmox nodes, space-separated (e.g. root@pve1 root@pve2)" "${CCDEV_PVE:-}"
+  [[ -n "$n" ]] || { echo "  No nodes, no source." >&2; return 1; }
+  # Ohne Benutzer entscheidet ssh; ist dort nur der lokale Benutzer zu erwarten, root vorschlagen
+  for u in $n; do
+    if [[ "$u" != *@* ]]; then
+      user=$(ssh -G "$u" 2>/dev/null | awk '$1 == "user" {print $2}')
+      if [[ -z "$user" || "$user" == "$(id -un)" ]]; then
+        ask yn "  No user given for $u, ssh would log in as '${user:-$(id -un)}'. Use root@$u instead? [Y/n]"
+        [[ -z "$yn" || "$yn" == [jJyY]* ]] && u="root@$u"
+      else
+        echo "  $u: user '$user' from ~/.ssh/config" >&2
+      fi
     fi
+    nodes+="${nodes:+ }$u"
   done
-  [[ $ok -eq 1 ]] || { local go; ask go "  Keep it anyway? [y/N]"; [[ "$go" == [jJyY]* ]] || return 1; }
+  for u in $nodes; do pve_check "$u" && ok=1; done
+  [[ $ok -eq 1 ]] || { ask yn "  Keep it anyway? [y/N]"; [[ "$yn" == [jJyY]* ]] || return 1; }
   ask tag "  Tag of the guests" "${CCDEV_PVE_TAG:-claude}"
   ask types "  Containers and/or VMs (lxc qemu)" "lxc qemu"
   ask user "  Login user for the guests" "${CCDEV_PVE_USER:-root}"
